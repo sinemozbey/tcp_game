@@ -6,7 +6,7 @@ from utils.logger import get_logger
 from utils.config import (
     GAME_DURATION_SECONDS,
     RESPONSE_TIMEOUT_SECONDS,
-    MAX_RWND,
+    MAX_RWND,TIMELINE_PLOT_FILE,
 )
 from .packet import Packet
 from .validator import PacketValidator
@@ -154,16 +154,22 @@ class GameLogic:
         my_turn_to_send = self.starts_first
 
         try:
-            while time.time() - start_time < GAME_DURATION_SECONDS:
-                remaining = int(GAME_DURATION_SECONDS - (time.time() - start_time))
-                self.logger.info(f"Remaining time: {remaining}s | {self.scoreboard.snapshot()}")
+            while True:
+                elapsed = time.time() - start_time
+                remaining = GAME_DURATION_SECONDS - elapsed
+
+                # SÜRE KONTROLÜ: önce bunu yap
+                if remaining <= 0:
+                    self.logger.info(f"Remaining time: 0s | {self.scoreboard.snapshot()}")
+                    break
+
+                # Buradan sonrası sadece süre > 0 iken çalışır
+                self.logger.info(f"Remaining time: {int(remaining)}s | {self.scoreboard.snapshot()}")
 
                 if my_turn_to_send:
-                    # Our turn to generate DATA packet
                     try:
                         pkt = self._create_next_data_packet()
                     except RuntimeError:
-                        # Window full – we just send an ACK-only packet to keep flow
                         ack = self.validator.peer.last_seq + self.validator.peer.last_len
                         pkt = Packet.make_ack(
                             seq=self.gbn.state.next_seq,
@@ -171,27 +177,24 @@ class GameLogic:
                             rwnd=self.current_rwnd,
                             comment="Window full, ACK-only",
                         )
-
                     self._send_packet(pkt)
                     my_turn_to_send = False
                 else:
-                    # Wait for peer's packet and respond (ACK or ERROR).
                     try:
                         pkt = self._receive_packet()
                     except TimeoutError:
-                        # Peer didn't respond in 30 seconds → they lose 1 point
                         self.logger.warning("Peer timeout → we gain +1")
                         self.scoreboard.opponent_timeout()
                         my_turn_to_send = True
                         continue
                     except ConnectionError as e:
-                        # Peer closed / reset connection → oyun burada biter
                         self.logger.warning(f"Connection closed by peer: {e}. Ending game loop.")
                         break
 
-                    # Answer them (ACK / ERROR)
                     self._respond_to_incoming(pkt)
                     my_turn_to_send = True
+                    time.sleep(0.01)  # 10ms bekle, terminali rahatlatır
+
 
         except (TimeoutError, ConnectionError) as e:
             self.logger.warning(f"Game ended due to connection problem: {e}")
@@ -200,23 +203,25 @@ class GameLogic:
             self._plot_timeline()
             self.conn.close()
             self.logger.info(f"Final score: {self.scoreboard.snapshot()}")
+
+
     
     def _plot_timeline(self):
         """
-        Oyunda gönderilen/alınan tüm paketlerin zaman çizelgesini çizer.
-        utils.timeline_plot.plot_timeline fonksiyonunu kullanır.
+        Toplanan timeline eventlerini kullanarak grafik oluşturur.
+        utils.timeline_plot.plot_timeline fonksiyonunu çağırır.
         """
         if not self.timeline:
             self.logger.info("Timeline boş, çizilecek event yok.")
             return
 
         try:
-            # timeline_plot.plot_timeline nasıl tanımlıysa ona göre argüman veriyoruz.
-            # En basit hali: sadece event listesini ver.
-            plot_timeline(self.timeline)
-            self.logger.info("Timeline grafiği başarıyla oluşturuldu.")
+            # Burada senin plot_timeline(events, output_file="timeline.png") fonksiyonunu kullanıyoruz
+            plot_timeline(self.timeline, TIMELINE_PLOT_FILE)
+            self.logger.info(f"Timeline grafiği kaydedildi: {TIMELINE_PLOT_FILE}")
         except Exception as e:
-            self.logger.warning(f"Timeline çizimi sırasında hata: {e}")
+            self.logger.warning(f"Timeline çizimi sırasında hata oluştu: {e}")
+
 
 
 
