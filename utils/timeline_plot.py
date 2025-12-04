@@ -4,7 +4,6 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import List
 
-
 @dataclass
 class TimelineEvent:
     timestamp: float
@@ -16,21 +15,12 @@ class TimelineEvent:
     length: int | None
     kind: str  # "DATA", "ACK", "ERROR", "RETX"
 
-
 def plot_timeline(events: List[TimelineEvent], output_file: str = "timeline.png"):
-    """
-    Simple TCP-like time diagram:
-    X-axis: endpoints, Y-axis: time
-    """
-
     if not events:
         print("No events to plot.")
         return
 
-    # Map endpoints to x positions
-    endpoints = sorted(
-        {e.sender for e in events} | {e.receiver for e in events}
-    )
+    endpoints = sorted({e.sender for e in events} | {e.receiver for e in events})
     x_positions = {name: i for i, name in enumerate(endpoints)}
 
     times = [e.timestamp for e in events]
@@ -38,21 +28,30 @@ def plot_timeline(events: List[TimelineEvent], output_file: str = "timeline.png"
 
     plt.figure(figsize=(6, 8))
 
-    # Vertical lines for endpoints
+    max_y = max(times) - t0 + 1
     for name, x in x_positions.items():
-        plt.plot([x, x], [0, max(times) - t0 + 1], linestyle="--")
-        plt.text(x, max(times) - t0 + 1.2, name, ha="center")
+        plt.plot([x, x], [0, max_y], linestyle="--")
+        plt.text(x, max_y + 0.2, name, ha="center")
+
+    color_map = {
+        "DATA": "black",
+        "ACK": "blue",
+        "ERROR": "red",
+        "RETX": "orange",
+    }
 
     for e in events:
         y = e.timestamp - t0 + 0.5
         x_start = x_positions[e.sender]
         x_end = x_positions[e.receiver]
 
+        color = color_map.get(e.kind, "black")
+
         plt.annotate(
             "",
             xy=(x_end, y),
             xytext=(x_start, y),
-            arrowprops=dict(arrowstyle="->"),
+            arrowprops=dict(arrowstyle="->", color=color),
         )
 
         label = f"{e.kind}"
@@ -65,7 +64,8 @@ def plot_timeline(events: List[TimelineEvent], output_file: str = "timeline.png"
         if e.length is not None:
             label += f" len={e.length}"
 
-        plt.text((x_start + x_end) / 2, y + 0.1, label, fontsize=7, ha="center")
+        plt.text((x_start + x_end) / 2, y + 0.1, label,
+                 fontsize=7, ha="center", color=color)
 
     plt.xlabel("Endpoints")
     plt.ylabel("Time")
