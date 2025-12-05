@@ -1,251 +1,173 @@
-# TCP GAME
+🚀 TCP GAME – Interactive TCP Transmission Simulator
+<p align="center"> <img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square" /> <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square" /> <img src="https://img.shields.io/badge/GUI-Tkinter-green?style=flat-square" /> <img src="https://img.shields.io/badge/Networking-TCP%20Sockets-orange?style=flat-square" /> <img src="https://img.shields.io/badge/Status-Active-success?style=flat-square" /> </p>
+📌 Overview
 
-TCP Simulation & Visualization Platform
+TCP Game is an interactive, high-fidelity TCP transmission simulator built on real Python TCP sockets, designed for education, debugging, and transport-layer visualization.
 
-A high-fidelity, interactive TCP simulation environment designed for understanding, debugging, and visualizing core transport-layer behaviors such as Go-Back-N ARQ, flow control, window management, packet exchange, and real-time event timelines.
-The platform supports two independent TCP endpoints (ClientA & ClientB) communicating over an actual TCP socket, enhanced with a dual-panel graphical interface and live packet animation.
+The platform features:
 
-🚀 Overview
-
-This platform emulates a simplified but technically accurate TCP transmission model.
-It allows users to interactively control packet sizes, observe retransmissions, window behavior, and visualize packet flow in real time.
-
-The system is suitable for:
-
-Networking courses / labs
-
-Transport protocol visualization
-
-Developer education & internal training
-
-Simulation research
-
-Demonstrating flow control + reliability mechanisms
-
-Creating publishable demos for TCP internals
-
-🔧 Core Features
-✔ Real TCP connection beneath the simulation
-
-ClientA and ClientB communicate using actual Python sockets (socket module), ensuring realistic timing and network behavior.
-
-✔ Go-Back-N ARQ Implementation
-
-Cumulative ACKs
-
-Duplicate ACK detection
-
-Window sliding
-
-Trigger-based retransmission (≥2 duplicate ACKs)
-
-Base & next_seq tracking
-
-Full retransmission cycles
-
-✔ Receiver-Side Flow Control (rwnd)
-
-The receive window dynamically adapts based on buffer occupancy.
-
-When window = 0 → sender must stop
-
-If sender transmits while rwnd=0 → violation → penalty
-
-Background buffer processing every 30 seconds (simulates "application layer consumption")
-
-✔ Variable Segment Size (1–5 bytes or ACK-only)
-
-Users (or test scripts) can send arbitrary-sized packets to test behavior under:
-
-Large segments
-
-Rapid small segments
-
-Window overflow
-
-Mixed ACK/data sequences
-
-✔ High-Fidelity Timeline Visualization
-
-At the end of each session, the system generates timeline.png illustrating:
-
-DATA, ACK, ERROR, RETX packets
-
-Exact timestamps
-
-Sender → receiver arrows
-
-Color-coded event types
-
-Sequencing and window evolution
-
-Perfect for reporting, grading, or analysis.
-
-✔ Dual-View Professional GUI
-
-Built with Tkinter, featuring:
-
-Side-by-side TCP endpoints
-
-Interactive packet input
-
-Real-time logs per endpoint
-
-Animated packet flow between clients
-
-Professional design layout
-
-Fully decoupled UI and logic (clean architecture)
-
-A premium-quality visualization suitable for demos, classrooms, and technical presentations.
-
-🏛 System Architecture
-tcp_game/
-│
-├── client_A.py             # Launcher for ClientA
-├── client_B.py             # Launcher for ClientB
-│
-├── gui_client.py           # Dual-view professional GUI + animation & control
-│
-├── core/
-│   ├── connection.py       # TCP socket wrapper (JSON-based messaging)
-│   ├── game_logic.py       # Core simulation engine (ARQ, flow control, scoring)
-│   ├── packet.py           # Packet definition & JSON conversion
-│   ├── scoreboard.py       # Score tracking engine
-│   ├── validator.py        # DATA/ACK validation rules
-│   ├── gbn.py              # Go-Back-N ARQ implementation
-│
-├── utils/
-│   ├── config.py           # Global settings
-│   ├── timeline_plot.py    # Matplotlib-based event timeline renderer
-│   ├── logger.py           # Per-client logging infrastructure
-│
-└── logs/
-
-🎮 GUI Demo
-
-The graphical interface displays both endpoints side-by-side:
-
-ClientA on the left
-
-ClientB on the right
-
-Real packet animation moves across the screen
-
-Each event logs instantly on the corresponding client side
-
-This offers an intuitive understanding of how TCP behaves in real time.
-
-🔍 Key Simulation Behaviors
-1. Packet Transmission
-
-Users choose segment length → simulator maps to sequence space → DATA/ACK flows across animation.
-
-2. Flow Control
-
-Receiver window shrinks as DATA arrives.
-If full for ≥30 seconds → receiver penalized.
-
-3. Application-Layer Drain
-
-Every 30 seconds, the receiver "processes" part of its buffer → window opens again.
-
-4. ACK Behavior
-
-Pure ACK
-
-Window-full ACK-only
-
-ACK-after-ERROR
-
-Cumulative acknowledgment (pkt.seq + length)
-
-5. Error Detection
-
-Receiver validates:
-
-Sequence correctness
-
-Length
-
-rwnd compatibility
-
-Retransmission rules
-
-Invalid packets → ERROR → sender penalized.
-
-🖼 Example Timeline
-
-(Timeline will be auto-generated)
-
-timeline.png
-
-
-Displays DATA ↔ ACK ↔ RETX exchanges chronologically.
-
-🧪 How to Run
-Start Client A (server mode):
-python client_A.py
-
-Start Client B (client mode):
-python client_B.py
-
-
-Both will load into a single professional GUI window.
-
-🧱 Technical Stack
-
-Python 3.10+
-
-Tkinter (GUI)
-
-Matplotlib (timeline renderer)
-
-Socket API + JSON framing
-
-Multithreading (GUI + game loop)
-
-Clean OOP architecture
-
-📘 Future Extensions (Already Supported Architecturally)
-
-Selective Repeat ARQ module
-
-Congestion control (Slow Start, AIMD)
-
-Real network delay emulation
-
-Logging export to CSV / PCAP
-
-Step-by-step protocol replay
-
-🏆 Why This Project Is Professional-Grade
-
-Clean separation: UI ↔ Logic ↔ Network
+Two independent TCP endpoints (ClientA & ClientB)
 
 Real socket communication
 
-Accurate TCP-style behaviors
+Manual packet-size control
 
-Visual, interactive, animated
+Go-Back-N ARQ logic
 
-Extensible architecture
+Flow control & receive window modeling
 
-Production-quality documentation
+Live packet animation between clients
 
-Reproducible, testable simulation behaviors
+Dual-panel GUI combining logs, manual controls, and animated packet flow
 
-Corporate-style logging & visualization
+This tool helps both students and professionals understand TCP behavior at a practical and visual level.
 
-This is not only a homework solution —
-it is a full-featured educational TCP simulation platform.
+🎯 Use Cases
 
-✔ License
+This system is ideal for:
 
-MIT — free to use, extend, and publish.
+Networking & Operating Systems courses
 
-🎯 Final Note
+TCP/UDP protocol visualization
 
-Bu proje, üniversite seviyesinin çok üzerinde bir profesyonellik ve mimari düzen içeriyor.
-Portföyünde kullanabilir, GitHub’da paylaşabilir, iş görüşmelerinde anlatabilir,
-hatta eğitim platformlarına satılabilir bir ürün seviyesindedi
+Developer training & onboarding
+
+Simulation of flow control mechanisms
+
+Go-Back-N ARQ demonstration
+
+Real-time debugging of packet behavior
+
+Research or demo environments
+
+🌟 Key Features
+✔ Real TCP Communication
+
+The system does not simulate network behavior — it uses real Python TCP sockets (socket module) to establish a live connection between ClientA and ClientB.
+
+✔ Go-Back-N ARQ Implementation
+
+Includes:
+
+Sliding window control
+
+Duplicate ACK detection
+
+Automatic retransmissions
+
+Dynamic update of base & next sequence number
+
+Window violation detection
+
+✔ Dynamic Flow Control (rwnd)
+
+Models:
+
+Receiver buffer size
+
+Window shrink/expand
+
+Zero-window handling (30-second rule)
+
+Illegal DATA transmission when rwnd=0
+
+✔ Professional Dual-View Interface
+
+Both endpoints appear in one unified GUI, visually representing:
+
+Local logs
+
+Packet input controls
+
+Outgoing & incoming messages
+
+Animated packet flow (DATA → ACK → RETX → ERROR)
+
+Example layout:
+
+ClientA  <------ animated packet flow ------>  ClientB
+
+
+(You can insert screenshots below.)
+
+✔ Packet Animation Engine
+
+Every packet (DATA, ACK, ERROR, RETX) is animated across the screen:
+
+Starts at sender node
+
+Moves smoothly along the center line
+
+Arrives at receiver
+
+Returns with response if needed
+
+This allows users to see TCP behavior, not just read logs.
+
+✔ Event Timeline Generation
+
+A high-quality PNG timeline is automatically generated:
+
+Each transmission is logged chronologically
+
+Color-coded arrows: DATA, ACK, ERROR, RETX
+
+Timestamped for debugging and reporting
+
+
+
+🔧 Installation
+1️⃣ Clone the repository
+git clone https://github.com/sinemozbey/tcp_game.git
+cd tcp_game
+
+2️⃣ Create and activate a virtual environment
+python3 -m venv .venv
+source .venv/bin/activate      # Linux/macOS
+.venv\Scripts\activate         # Windows
+
+3️⃣ Install dependencies
+pip install -r requirements.txt
+
+▶️ Running the Simulation
+Terminal 1 — Start Client A (server):
+python client_A.py
+
+Terminal 2 — Start Client B (client):
+python client_B.py
+
+
+Both will appear in a single GUI window with animation.
+
+
+🧪 Example Transmission Scenario
+
+ClientA sends DATA(len=3)
+
+Packet animates across the line
+
+ClientB validates, updates rwnd, sends ACK
+
+ACK animates back
+
+If duplicate ACKs occur → retransmission triggered
+
+If rwnd=0 and sender sends DATA → penalty applied
+
+30 seconds without window recovery → timeout logic runs
+
+🚀 Planned Enhancements
+
+Selective Repeat ARQ
+
+Artificial packet loss simulation
+
+Adjustable latency, jitter, and error rate
+
+Web-based interface (React / WebSockets)
+
+PCAP export for Wireshark analysis
+
+📜 License
+
+This project is licensed under the MIT License, providing full freedom for modification, use, and distribution.
