@@ -19,6 +19,8 @@ from .gbn import GoBackN
 from .scoreboard import Scoreboard
 from .connection import Connection, TimeoutError
 from utils.timeline_plot import TimelineEvent, plot_timeline
+from typing import List, Callable, Optional
+
 
 
 class GameLogic:
@@ -27,32 +29,69 @@ class GameLogic:
     One instance runs per client.
     """
 
-    def __init__(self, role_name: str, conn: Connection, starts_first: bool):
+class GameLogic:
+    """
+    High-level orchestration of the TCP Game.
+    One instance runs per client.
+    """
+
+    def __init__(
+        self,
+        role_name: str,
+        conn: Connection,
+        starts_first: bool,
+        length_provider: Optional[Callable[[], int]] = None,
+    ):
+        """
+        length_provider:
+          - None ise: eski davranış, terminalden input() ile uzunluk sorar.
+          - GUI kullanırken: dışarıdan verilen bir fonksiyon ile uzunluk alır.
+            Bu fonksiyon bloklayıcı olabilir (ör. queue.get()).
+        """
         self.role = role_name
         self.conn = conn
         self.starts_first = starts_first
 
         self.logger = get_logger(role_name)
         self.validator = PacketValidator()
-        # NOT: GoBackN, variable-length segmentler için güncellendi varsayılıyor
-        self.gbn = GoBackN()
+        self.gbn = GoBackN(segment_length=1)
         self.scoreboard = Scoreboard()
         self.timeline: List[TimelineEvent] = []
 
         self.last_sent_seq = 0
+        self.current_rwnd = MAX_RWND
+        self.recv_buffer_used = 0
+        self.last_window_update = time.time()
+        self.window_full_since = None
+        self.zero_window_since = None
+        self.last_activity_time = time.time()
 
-        # Receive window / buffer durumu
-        self.current_rwnd = MAX_RWND          # advertise ettiğimiz pencere
-        self.recv_buffer_used = 0             # receive buffer'da dolu byte sayısı
-
-        # Timer'lar
-        self.last_window_update = time.time()  # en son "uygulama veri işledi" zamanı
-        self.window_full_since = None          # rwnd == 0 olduğu an (full pencere)
-        self.zero_window_since = None          # rwnd=0 advertisement ne zamandır sürüyor
-        self.last_activity_time = time.time()  # son paket alışverişi (send/recv) zamanı
-
-        # GBN duplicate ACK sonrası bir sonraki DATA'nın retransmit olduğunu işaretler
         self._pending_retransmit = False
+
+        # GUI veya CLI’den uzunluk sağlayan fonksiyon
+        self.length_provider = length_provider
+
+    
+    def _get_segment_length_from_user(self) -> int:
+        """
+        Kullanıcıdan paket uzunluğu isteyen soyut katman.
+        Eğer dışarıdan provider verilmemişse, klasik input() kullanır.
+        """
+        if self.segment_length_provider is not None:
+            return self.segment_length_provider(self.role)
+
+        # Default: CLI (terminal) input
+        while True:
+            try:
+                size_str = input(
+                    f"{self.role}: Göndereceğin DATA uzunluğu "
+                    f"({MIN_SEGMENT_SIZE}-{MAX_SEGMENT_SIZE}, 0 = sadece ACK): "
+                ).strip()
+                if size_str == "":
+                    return 1
+                return int(size_str)
+            except ValueError:
+                print(f"{self.role}: Lütfen sayısal bir değer gir.")
 
     # --- Utility methods -------------------------------------------------
 
@@ -121,12 +160,15 @@ class GameLogic:
 
     # --- Game turn logic -------------------------------------------------
 
-    def _create_next_data_packet(self) -> Packet:
-        """
-        Bir SONRAKİ DATA segmentini insan kontrollü olarak oluşturur.
-        Kullanıcıdan paket uzunluğunu alır.
-        """
+    # -------------------------------------------------------------- #
+    # İnsan girdisi (CLI) için yardımcı fonksiyon
+    # -------------------------------------------------------------- #
 
+    def _ask_segment_length_cli(self) -> int:
+        """
+        Terminalden kullanıcıya sorarak segment uzunluğu alır.
+        (GUI kullanılmadığı durumlarda devreye girer.)
+        """
         while True:
             try:
                 size_str = input(
@@ -144,41 +186,77 @@ class GameLogic:
                 print(f"{self.role}: Lütfen sayısal bir değer gir (örn. 1, 2, 3...).")
                 continue
 
-            # 0 → sadece ACK gönder (DATA yok)
-            if length == 0:
-                ack = self.validator.peer.last_seq + self.validator.peer.last_len
-                rwnd = self.current_rwnd
-                pkt = Packet.make_ack(
-                    seq=self.gbn.state.next_seq,
-                    ack=ack,
-                    rwnd=rwnd,
-                    comment="User-chosen ACK-only",
-                )
-                return pkt
-
-            # Negatif ise tekrar sor
             if length < 0:
                 print(f"{self.role}: Negatif uzunluk olamaz.")
                 continue
 
-            # Aralık dışında ise tekrar sor
-            if length < MIN_SEGMENT_SIZE or length > MAX_SEGMENT_SIZE:
+            if length != 0 and (length < MIN_SEGMENT_SIZE or length > MAX_SEGMENT_SIZE):
                 print(
                     f"{self.role}: Uzunluk {MIN_SEGMENT_SIZE}-{MAX_SEGMENT_SIZE} "
                     f"arasında olmalı."
                 )
                 continue
 
-            # Buraya geldiysek length geçerli
-            break
+            return length
 
-        # Go-Back-N penceresinden bir sonraki DATA segmentini al
+
+
+    # --- Packet creation (user controlled) ---------------------------
+
+    def _create_next_data_packet(self) -> Packet:
+        """
+        Bir SONRAKİ DATA segmentini insan kontrollü olarak oluşturur.
+        - Eğer length_provider atanmışsa (GUI): ondan bir int bekler.
+        - Aksi halde: terminalden input() ile uzunluk sorar.
+        """
+
+        # 1) Uzunluğu al (GUI veya CLI)
+        if self.length_provider is not None:
+            # GUI tarafı bir int döndürmeli (0 = sadece ACK)
+            length = self.length_provider()
+            self.logger.info(f"GUI selected length={length}")
+        else:
+            # Eski terminal davranışı
+            length = self._ask_segment_length_cli()
+
+        # 2) 0 → sadece ACK gönder (DATA yok)
+        if length == 0:
+            ack = self.validator.peer.last_seq + self.validator.peer.last_len
+            rwnd = self.current_rwnd
+            pkt = Packet.make_ack(
+                seq=self.gbn.state.next_seq,
+                ack=ack,
+                rwnd=rwnd,
+                comment="User-chosen ACK-only",
+            )
+            return pkt
+
+        # 3) Güvenlik amaçlı sınırları burada da kontrol edelim (GUI için)
+        if length < 0:
+            self.logger.warning(
+                f"{self.role}: Negatif uzunluk alındı ({length}), 1 byte olarak düzeltiliyor."
+            )
+            length = 1
+
+        if length < MIN_SEGMENT_SIZE:
+            self.logger.warning(
+                f"{self.role}: Uzunluk {length} < MIN_SEGMENT_SIZE, {MIN_SEGMENT_SIZE} olarak düzeltiliyor."
+            )
+            length = MIN_SEGMENT_SIZE
+        elif length > MAX_SEGMENT_SIZE:
+            self.logger.warning(
+                f"{self.role}: Uzunluk {length} > MAX_SEGMENT_SIZE, {MAX_SEGMENT_SIZE} olarak düzeltiliyor."
+            )
+            length = MAX_SEGMENT_SIZE
+
+        # 4) Go-Back-N penceresinden bir sonraki DATA segmentini al
         seq, real_length = self.gbn.next_data_segment(length=length)
 
         # Basitlik için: ack = peer'den son in-order byte
         ack = self.validator.peer.last_seq + self.validator.peer.last_len
         rwnd = self.current_rwnd
         return Packet.data(seq=seq, ack=ack, rwnd=rwnd, length=real_length)
+
 
     # ------------------------------------------------------------------ #
     # Incoming packet handling
