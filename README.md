@@ -1,4 +1,4 @@
-# tcp_game
+# TCP GAME
 
 TCP Simulation & Visualization Platform
 
