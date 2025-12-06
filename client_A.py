@@ -6,7 +6,7 @@ from gui_client import run_gui_client
 
 
 def main():
-    # A tarafı server: dinler ve oyuna ilk başlayan taraf olsun
+    
     conn = Connection.create_as_server()
     run_gui_client(role=ROLE_A_NAME, conn=conn, starts_first=True)
 

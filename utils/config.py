@@ -1,15 +1,15 @@
 # utils/config.py
 
 HOST = "127.0.0.1"
-PORT = 50000  # Client A listen, Client B connects
+PORT = 50000  
 
-GAME_DURATION_SECONDS = 300      # 30 saniyelik oyun
-RESPONSE_TIMEOUT_SECONDS = 5    # cevap bekleme süresi 5 sn
+GAME_DURATION_SECONDS = 300      
+RESPONSE_TIMEOUT_SECONDS = 5    
 
 MAX_RWND = 5
 TIMELINE_PLOT_FILE = "timeline.png"
 INITIAL_SEQ = 0
-WINDOW_SIZE = 4  # Go-Back-N sliding window size
+WINDOW_SIZE = 4 
 
 LOG_DIR = "logs"
 

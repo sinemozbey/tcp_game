@@ -16,13 +16,17 @@ from utils.config import (
 
 
 # ===================================================================== #
-#  ÜST BÖLÜM: ANİMASYON PANELİ (LOCAL <-> PEER ARASINDA TOP UÇUYOR)
+#  TOP SECTION: ANIMATION PANEL (LOCAL <-> PEER PACKET FLOW)
 # ===================================================================== #
 
 class TrafficCanvas(ttk.Frame):
     """
-    Üstteki animasyon alanı.
-    Solda "Local", sağda "Peer" kutuları ve arada giden-gelen top (packet) animasyonu.
+    Top animation area.
+
+    Shows:
+      - LOCAL endpoint box on the left
+      - PEER endpoint box on the right
+      - A moving "ball" in between representing TCP packets
     """
 
     def __init__(self, master: tk.Misc, local_name: str, peer_name: str, **kwargs):
@@ -40,26 +44,23 @@ class TrafficCanvas(ttk.Frame):
         self.peer_label = None
         self.line_id = None
 
-        # Aktif top (packet) id'si ve animasyon kuyruğu
+        # Current packet (ball) and animation queue
         self.current_ball = None
         self.current_ball_text = None
         self.anim_queue: "queue.Queue[dict]" = queue.Queue()
         self.anim_running = False
 
         self._build_static()
-        # periyodik animasyon döngüsü
+        # Periodic animation loop
         self.after(40, self._animation_step)
 
     def _build_static(self):
-        w = self.canvas.winfo_reqwidth()
-        h = self.canvas.winfo_reqheight()
-
-        # koordinatları sabit bir layout gibi düşün
+        # Static positions (like a simple layout)
         x_local = 80
         x_peer = 420
         y_center = 80
 
-        # Local ve Peer kutuları
+        # LOCAL and PEER rectangles
         self.local_box = self.canvas.create_rectangle(
             x_local - 40, y_center - 25, x_local + 40, y_center + 25,
             outline="#4a90e2", width=2, fill="#ffffff"
@@ -76,14 +77,14 @@ class TrafficCanvas(ttk.Frame):
             x_peer, y_center + 38, text=self.peer_name, font=("Helvetica", 9, "bold")
         )
 
-        # Aradaki “hat”
+        # Dashed line between LOCAL and PEER
         self.line_id = self.canvas.create_line(
             x_local + 40, y_center, x_peer - 40, y_center,
             dash=(4, 2), fill="#999999"
         )
 
     # ------------------------------------------------------------------ #
-    #  Dışarıdan çağrılacak: yeni bir animasyon isteği kuyrukla
+    #  Public API: enqueue a new packet animation
     # ------------------------------------------------------------------ #
 
     def enqueue_packet(
@@ -95,7 +96,7 @@ class TrafficCanvas(ttk.Frame):
         length: int | None,
     ):
         """
-        direction: "outgoing" (local -> peer) veya "incoming" (peer -> local)
+        direction: "outgoing" (local -> peer) or "incoming" (peer -> local)
         kind: "DATA", "ACK", "ERROR", "RETX"
         """
         self.anim_queue.put(
@@ -109,11 +110,11 @@ class TrafficCanvas(ttk.Frame):
         )
 
     # ------------------------------------------------------------------ #
-    #  Animasyon döngüsü
+    #  Animation loop
     # ------------------------------------------------------------------ #
 
     def _start_next_ball(self, item: dict):
-        # Eski topu temizle
+        # Clear previous ball (if any)
         if self.current_ball is not None:
             self.canvas.delete(self.current_ball)
             self.current_ball = None
@@ -121,20 +122,20 @@ class TrafficCanvas(ttk.Frame):
             self.canvas.delete(self.current_ball_text)
             self.current_ball_text = None
 
-        # Hat koordinatlarını al
+        # Line coordinates
         x1, y1, x2, y2 = self.canvas.coords(self.line_id)
         direction = item["direction"]
 
         if direction == "outgoing":
             x = x1
             dx = +6
-        else:  # incoming
+        else:  # "incoming"
             x = x2
             dx = -6
 
         y = y1
 
-        # Top (packet)
+        # Packet ball
         r = 7
         color_map = {
             "DATA": "#3498db",
@@ -161,52 +162,53 @@ class TrafficCanvas(ttk.Frame):
         )
 
         self.anim_running = True
-        # delta'yı ball objesinin tag'ine yazarız
+        # Store delta as tag (for direction)
         self.canvas.itemconfig(self.current_ball, tags=("ball", str(dx)))
         self.canvas.itemconfig(self.current_ball_text, tags=("ball_text", str(dx)))
 
     def _animation_step(self):
         """
-        Her 40ms'de bir çağrılır: aktif topu hareket ettirir
-        veya yeni animasyon başlatır.
+        Called every 40 ms: moves current ball or starts the next one.
         """
         if self.anim_running and self.current_ball is not None:
             x1, y1, x2, y2 = self.canvas.coords(self.current_ball)
-            _, _, line_x2, _ = self.canvas.coords(self.line_id)
+            line_x1, _, line_x2, _ = self.canvas.coords(self.line_id)
             tags = self.canvas.gettags(self.current_ball)
             dx = int(tags[1]) if len(tags) > 1 else 6
 
-            # Hedefe ulaşmadıysa hareket ettir
-            if (dx > 0 and x2 < line_x2) or (dx < 0 and x1 > self.canvas.coords(self.line_id)[0]):
+            # Move until reaching the other side
+            if (dx > 0 and x2 < line_x2) or (dx < 0 and x1 > line_x1):
                 self.canvas.move(self.current_ball, dx, 0)
                 self.canvas.move(self.current_ball_text, dx, 0)
             else:
-                # Hedefe ulaştı → animasyonu bitir, sıradaki topa geç
+                # Reached the target → clear and stop
                 self.canvas.delete(self.current_ball)
                 self.canvas.delete(self.current_ball_text)
                 self.current_ball = None
                 self.current_ball_text = None
                 self.anim_running = False
 
-        # Eğer animasyon yoksa ve kuyrukta iş varsa yeni top başlat
+        # If no animation is running and there is a queued item → start it
         if not self.anim_running and not self.anim_queue.empty():
             item = self.anim_queue.get_nowait()
             self._start_next_ball(item)
 
-        # Tekrar çağır
+        # Schedule next step
         self.after(40, self._animation_step)
 
 
 # ===================================================================== #
-#  ALT BÖLÜM: TEK CLIENT PENCERESİ (LOCAL FORM + LOG PANELİ)
+#  SINGLE CLIENT WINDOW (LOCAL FORM + LOG PANEL)
 # ===================================================================== #
 
 class SingleClientGUI(ttk.Frame):
     """
-    Tek client için profesyonel arayüz:
-      - Üstte animasyon (TrafficCanvas)
-      - Ortada packet control (length girişi)
-      - Altta local log alanı
+    UI for a single endpoint (ClientA or ClientB).
+
+    Layout:
+      - Top: packet animation (TrafficCanvas)
+      - Middle: packet control (DATA length input)
+      - Bottom: local log area
     """
 
     def __init__(self, root: tk.Tk, role: str):
@@ -217,7 +219,7 @@ class SingleClientGUI(ttk.Frame):
         self.min_size = MIN_SEGMENT_SIZE
         self.max_size = MAX_SEGMENT_SIZE
 
-        # Peer adını config'ten çıkar
+        # Resolve peer name from config
         self.peer_name = ROLE_B_NAME if role == ROLE_A_NAME else ROLE_A_NAME
 
         self._length_queue: "queue.Queue[int]" = queue.Queue()
@@ -225,14 +227,14 @@ class SingleClientGUI(ttk.Frame):
         self._build_ui()
 
     # ------------------------------------------------------------------ #
-    #  UI kur
+    #  UI setup
     # ------------------------------------------------------------------ #
 
     def _build_ui(self):
         self.root.title(f"TCP Game – {self.role}")
         self.root.geometry("900x600")
 
-        # Üst açıklama
+        # Header
         header = ttk.Label(
             self,
             text=f"TCP Game – {self.role}",
@@ -243,19 +245,19 @@ class SingleClientGUI(ttk.Frame):
         sub = ttk.Label(
             self,
             text=(
-                f"Tek pencere, iki uçtan birini temsil eder. Bu pencere LOCAL taraf: {self.role}.\n"
-                f"Soldaki kutu LOCAL, sağdaki kutu PEER ({self.peer_name}). "
-                f"Aradaki top gerçek TCP paket akışını temsil eder."
+                f"This window represents one endpoint. LOCAL side: {self.role}.\n"
+                f"The left box is LOCAL, the right box is PEER ({self.peer_name}). "
+                f"The moving ball between them visualizes the TCP packet flow."
             ),
             justify="center",
         )
         sub.pack(pady=(0, 10))
 
-        # Üst animasyon alanı
+        # Top: animation area
         self.traffic = TrafficCanvas(self, local_name=self.role, peer_name=self.peer_name)
         self.traffic.pack(fill="x", pady=(0, 8))
 
-        # Orta bölüm: Packet Control
+        # Middle: Packet Control
         mid_frame = ttk.LabelFrame(self, text="Packet Control", padding=10)
         mid_frame.pack(fill="x", pady=(4, 8))
 
@@ -266,7 +268,7 @@ class SingleClientGUI(ttk.Frame):
             inner,
             text=(
                 f"DATA length: {self.min_size}-{self.max_size}\n"
-                f"0 = sadece ACK göndermek için"
+                f"0 = send ACK only (no DATA)"
             ),
             justify="left",
         )
@@ -280,11 +282,11 @@ class SingleClientGUI(ttk.Frame):
         send_btn = ttk.Button(inner, text="Send", command=self._on_send_clicked)
         send_btn.grid(row=1, column=1, padx=(0, 8))
 
-        self.last_len_var = tk.StringVar(value="Son girilen length = -")
+        self.last_len_var = tk.StringVar(value="Last entered length = -")
         last_lbl = ttk.Label(inner, textvariable=self.last_len_var)
         last_lbl.grid(row=1, column=2, sticky="w")
 
-        # Alt bölüm: Local Info (log panel)
+        # Bottom: Local Info (log panel)
         bottom = ttk.LabelFrame(self, text="Local Info", padding=8)
         bottom.pack(fill="both", expand=True)
 
@@ -296,7 +298,7 @@ class SingleClientGUI(ttk.Frame):
         self.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------ #
-    #  Kullanıcı eventleri
+    #  User events
     # ------------------------------------------------------------------ #
 
     def _on_send_clicked(self):
@@ -329,18 +331,19 @@ class SingleClientGUI(ttk.Frame):
             )
             return
 
-        # Valid
+        # Valid input
         self._length_queue.put(length)
-        self.last_len_var.set(f"Son girilen length = {length}")
+        self.last_len_var.set(f"Last entered length = {length}")
         self.length_var.set("")
 
         self.append_log(f"User input: length={length}")
 
     # ------------------------------------------------------------------ #
-    #  GameLogic tarafı için API
+    #  API used by GameLogic
     # ------------------------------------------------------------------ #
 
     def get_next_length_blocking(self) -> int:
+        """Block until the user provides a length."""
         return self._length_queue.get()
 
     def append_log(self, text: str):
@@ -349,22 +352,20 @@ class SingleClientGUI(ttk.Frame):
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    # animasyon için convenience metodları
+    # Convenience methods for animation
     def animate_send(self, pkt: Packet):
-        kind = pkt.type
         self.traffic.enqueue_packet(
             direction="outgoing",
-            kind=kind,
+            kind=pkt.type,
             seq=pkt.seq,
             ack=pkt.ack,
             length=pkt.length,
         )
 
     def animate_recv(self, pkt: Packet):
-        kind = pkt.type
         self.traffic.enqueue_packet(
             direction="incoming",
-            kind=kind,
+            kind=pkt.type,
             seq=pkt.seq,
             ack=pkt.ack,
             length=pkt.length,
@@ -372,30 +373,31 @@ class SingleClientGUI(ttk.Frame):
 
 
 # ===================================================================== #
-#  GAME LOGIC + GUI ENTEGRASYONU
+#  GAME LOGIC + GUI INTEGRATION
 # ===================================================================== #
 
 class GameLogicGUI(GameLogic):
     """
-    GameLogic + tek pencere GUI entegrasyonu.
-    - _create_next_data_packet: GUI'den length alır.
-    - _send_packet / _receive_packet: log + animasyon ekler.
+    GameLogic + single-window GUI integration.
+
+    - _create_next_data_packet: gets DATA length from the GUI.
+    - _send_packet / _receive_packet: add logging + animation hooks.
     """
 
     def __init__(self, role_name, conn, starts_first, ui: SingleClientGUI):
         super().__init__(role_name, conn, starts_first)
         self.ui = ui
 
-    # ---- GÖNDERME TARAFI ------------------------------------------------
+    # ---- SENDER SIDE ----------------------------------------------------
 
     def _create_next_data_packet(self) -> Packet:
         """
-        CLI'deki input() yerine GUI'den length alır.
+        Overridden version that gets input from the GUI instead of CLI.
         """
         while True:
             length = self.ui.get_next_length_blocking()
 
-            # 0 → sadece ACK
+            # 0 → send ACK-only (no DATA)
             if length == 0:
                 ack = self.validator.peer.last_seq + self.validator.peer.last_len
                 rwnd = self.current_rwnd
@@ -414,7 +416,7 @@ class GameLogicGUI(GameLogic):
             try:
                 seq, real_length = self.gbn.next_data_segment(length=length)
             except RuntimeError:
-                # pencere dolu → sadece ACK gönder
+                # Send ACK-only when window is full
                 ack = self.validator.peer.last_seq + self.validator.peer.last_len
                 rwnd = self.current_rwnd
                 pkt = Packet.make_ack(
@@ -436,15 +438,15 @@ class GameLogicGUI(GameLogic):
             return Packet.data(seq=seq, ack=ack, rwnd=rwnd, length=real_length)
 
     def _send_packet(self, pkt: Packet):
-        # Önce log + animasyon
+        # Log + animation first
         self.ui.append_log(
             f"SEND → {pkt.type} | seq={pkt.seq}, ack={pkt.ack}, rwnd={pkt.rwnd}, len={pkt.length}"
         )
         self.ui.animate_send(pkt)
-        # Sonra orijinal davranış
+        # Then call original behavior
         super()._send_packet(pkt)
 
-    # ---- ALMA TARAFI ----------------------------------------------------
+    # ---- RECEIVER SIDE --------------------------------------------------
 
     def _receive_packet(self) -> Packet:
         pkt = super()._receive_packet()
@@ -456,13 +458,14 @@ class GameLogicGUI(GameLogic):
 
 
 # ===================================================================== #
-#  DIŞARIDAN ÇAĞRILACAK ENTRY-POINT
+#  PUBLIC ENTRY POINT
 # ===================================================================== #
 
 def run_gui_client(role: str, conn, starts_first: bool):
     """
-    client_A.py ve client_B.py burayı çağırıyor.
-    Her process kendi penceresini açıyor (tek uç – LOCAL).
+    Entry point used by client_A.py and client_B.py.
+
+    Each process opens its own window representing one TCP endpoint.
     """
     root = tk.Tk()
     ui = SingleClientGUI(root, role=role)

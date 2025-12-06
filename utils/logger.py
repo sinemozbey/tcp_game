@@ -12,7 +12,6 @@ def get_logger(name: str) -> logging.Logger:
     logger.setLevel(logging.DEBUG)
 
     if logger.handlers:
-        # Already configured
         return logger
 
     formatter = logging.Formatter(
