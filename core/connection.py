@@ -4,7 +4,7 @@ import socket
 import json
 from typing import Optional
 from utils.logger import get_logger
-from utils.config import HOST_BIND, HOST_CONNECT, PORT, RESPONSE_TIMEOUT_SECONDS
+from utils.config import HOST, PORT, RESPONSE_TIMEOUT_SECONDS
 
 logger = get_logger("connection")
 
@@ -36,9 +36,9 @@ class Connection:
     def create_as_server(cls) -> "Connection":
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((HOST_BIND, PORT))
+        s.bind((HOST, PORT))
         s.listen(1)
-        logger.info(f"Listening on {HOST_BIND}:{PORT}")
+        logger.info(f"Listening on {HOST}:{PORT}")
         conn, addr = s.accept()
         logger.info(f"Accepted connection from {addr}")
         s.close()
@@ -47,8 +47,8 @@ class Connection:
     @classmethod
     def create_as_client(cls) -> "Connection":
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        logger.info(f"Connecting to {HOST_CONNECT}:{PORT} ...")
-        s.connect((HOST_CONNECT, PORT))
+        logger.info(f"Connecting to {HOST}:{PORT} ...")
+        s.connect((HOST, PORT))
         logger.info("Connected.")
         return cls(s)
 
