@@ -7,6 +7,8 @@ from utils.logger import get_logger
 from utils.config import (
     GAME_DURATION_SECONDS,
     RESPONSE_TIMEOUT_SECONDS,
+    BUFFER_DRAIN_INTERVAL_SECONDS,
+    WINDOW_STALL_TIMEOUT_SECONDS,
     MAX_RWND,
     TIMELINE_PLOT_FILE,
     MIN_SEGMENT_SIZE,
@@ -369,8 +371,8 @@ class GameLogic:
             while True:
                 now = time.time()
 
-                # Her 30 saniyede bir uygulama tarafı buffer'dan veri işlesin
-                if now - self.last_window_update >= 30:
+                # Her BUFFER_DRAIN_INTERVAL_SECONDS saniyede bir uygulama tarafı buffer'dan veri işlesin
+                if now - self.last_window_update >= BUFFER_DRAIN_INTERVAL_SECONDS:
                     if self.recv_buffer_used > 0:
                         processed = max(1, self.recv_buffer_used // 2)
                         self.recv_buffer_used -= processed
@@ -399,11 +401,11 @@ class GameLogic:
                     )
                     break
 
-                # Receive window 30 saniye boyunca full kaldıysa
+                # Receive window WINDOW_STALL_TIMEOUT_SECONDS boyunca full kaldıysa
                 if self.window_full_since is not None:
-                    if now - self.window_full_since >= 30:
+                    if now - self.window_full_since >= WINDOW_STALL_TIMEOUT_SECONDS:
                         self.logger.warning(
-                            "Receive window 30 saniye boyunca full kaldı → biz suçluyuz, rakibe puan."
+                            f"Receive window {WINDOW_STALL_TIMEOUT_SECONDS} saniye boyunca full kaldı → biz suçluyuz, rakibe puan."
                         )
                         # Burada bizim hatamız → scoreboard.py'de bu olaya göre puanlama yapıldığına emin ol
                         self.scoreboard.opponent_timeout()
@@ -447,14 +449,14 @@ class GameLogic:
                     my_turn_to_send = True
                     time.sleep(0.2)  # 200ms bekle, terminali rahatlatır
 
-                # Eğer biz rwnd=0 durumunda kaldıysak ve 30 saniye hiçbir aktivite yoksa
+                # Eğer biz rwnd=0 durumunda kaldıysak ve WINDOW_STALL_TIMEOUT_SECONDS hiçbir aktivite yoksa
                 if self.zero_window_since is not None:
                     if (
-                        now - self.zero_window_since >= 30
-                        and now - self.last_activity_time >= 30
+                        now - self.zero_window_since >= WINDOW_STALL_TIMEOUT_SECONDS
+                        and now - self.last_activity_time >= WINDOW_STALL_TIMEOUT_SECONDS
                     ):
                         self.logger.warning(
-                            "30 saniye boyunca rwnd=0 kaldık ve hiç paket alışverişi olmadı → biz puan kaybediyoruz."
+                            f"{WINDOW_STALL_TIMEOUT_SECONDS} saniye boyunca rwnd=0 kaldık ve hiç paket alışverişi olmadı → biz puan kaybediyoruz."
                         )
                         # Burada da bizim hatamız; scoreboard.py'de buna göre puan verildiğinden emin ol
                         self.scoreboard.opponent_timeout()
