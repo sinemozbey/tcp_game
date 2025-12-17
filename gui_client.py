@@ -1,5 +1,4 @@
 # gui_client.py
-
 import threading
 import queue
 import tkinter as tk
@@ -7,469 +6,289 @@ from tkinter import ttk, messagebox
 
 from core.game_logic import GameLogic
 from core.packet import Packet
-from utils.config import (
-    MIN_SEGMENT_SIZE,
-    MAX_SEGMENT_SIZE,
-    ROLE_A_NAME,
-    ROLE_B_NAME,
-)
+from utils.config import MAX_RWND, MIN_SEGMENT_SIZE, MAX_SEGMENT_SIZE
 
 
-# ===================================================================== #
-#  TOP SECTION: ANIMATION PANEL (LOCAL <-> PEER PACKET FLOW)
-# ===================================================================== #
+# ============================================================
+#  GUI: Manual TCP Game Client (seq/ack/rwnd/len + ERROR karar)
+# ============================================================
 
-class TrafficCanvas(ttk.Frame):
+class ManualClientGUI(ttk.Frame):
     """
-    Top animation area.
-
-    Shows:
-      - LOCAL endpoint box on the left
-      - PEER endpoint box on the right
-      - A moving "ball" in between representing TCP packets
-    """
-
-    def __init__(self, master: tk.Misc, local_name: str, peer_name: str, **kwargs):
-        super().__init__(master, **kwargs)
-
-        self.local_name = local_name
-        self.peer_name = peer_name
-
-        self.canvas = tk.Canvas(self, height=140, bg="#f7f7f7", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True, padx=10, pady=8)
-
-        self.local_box = None
-        self.peer_box = None
-        self.local_label = None
-        self.peer_label = None
-        self.line_id = None
-
-        # Current packet (ball) and animation queue
-        self.current_ball = None
-        self.current_ball_text = None
-        self.anim_queue: "queue.Queue[dict]" = queue.Queue()
-        self.anim_running = False
-
-        self._build_static()
-        # Periodic animation loop
-        self.after(40, self._animation_step)
-
-    def _build_static(self):
-        # Static positions (like a simple layout)
-        x_local = 80
-        x_peer = 420
-        y_center = 80
-
-        # LOCAL and PEER rectangles
-        self.local_box = self.canvas.create_rectangle(
-            x_local - 40, y_center - 25, x_local + 40, y_center + 25,
-            outline="#4a90e2", width=2, fill="#ffffff"
-        )
-        self.peer_box = self.canvas.create_rectangle(
-            x_peer - 40, y_center - 25, x_peer + 40, y_center + 25,
-            outline="#e67e22", width=2, fill="#ffffff"
-        )
-
-        self.local_label = self.canvas.create_text(
-            x_local, y_center + 38, text=self.local_name, font=("Helvetica", 9, "bold")
-        )
-        self.peer_label = self.canvas.create_text(
-            x_peer, y_center + 38, text=self.peer_name, font=("Helvetica", 9, "bold")
-        )
-
-        # Dashed line between LOCAL and PEER
-        self.line_id = self.canvas.create_line(
-            x_local + 40, y_center, x_peer - 40, y_center,
-            dash=(4, 2), fill="#999999"
-        )
-
-    # ------------------------------------------------------------------ #
-    #  Public API: enqueue a new packet animation
-    # ------------------------------------------------------------------ #
-
-    def enqueue_packet(
-        self,
-        direction: str,
-        kind: str,
-        seq: int | None,
-        ack: int | None,
-        length: int | None,
-    ):
-        """
-        direction: "outgoing" (local -> peer) or "incoming" (peer -> local)
-        kind: "DATA", "ACK", "ERROR", "RETX"
-        """
-        self.anim_queue.put(
-            {
-                "direction": direction,
-                "kind": kind,
-                "seq": seq,
-                "ack": ack,
-                "length": length,
-            }
-        )
-
-    # ------------------------------------------------------------------ #
-    #  Animation loop
-    # ------------------------------------------------------------------ #
-
-    def _start_next_ball(self, item: dict):
-        # Clear previous ball (if any)
-        if self.current_ball is not None:
-            self.canvas.delete(self.current_ball)
-            self.current_ball = None
-        if self.current_ball_text is not None:
-            self.canvas.delete(self.current_ball_text)
-            self.current_ball_text = None
-
-        # Line coordinates
-        x1, y1, x2, y2 = self.canvas.coords(self.line_id)
-        direction = item["direction"]
-
-        if direction == "outgoing":
-            x = x1
-            dx = +6
-        else:  # "incoming"
-            x = x2
-            dx = -6
-
-        y = y1
-
-        # Packet ball
-        r = 7
-        color_map = {
-            "DATA": "#3498db",
-            "ACK": "#2ecc71",
-            "ERROR": "#e74c3c",
-            "RETX": "#f39c12",
-        }
-        color = color_map.get(item["kind"], "#34495e")
-
-        self.current_ball = self.canvas.create_oval(
-            x - r, y - r, x + r, y + r, fill=color, outline=""
-        )
-
-        label = item["kind"]
-        if item["seq"] is not None:
-            label += f" s={item['seq']}"
-        if item["ack"] is not None:
-            label += f" a={item['ack']}"
-        if item["length"] is not None:
-            label += f" len={item['length']}"
-
-        self.current_ball_text = self.canvas.create_text(
-            x, y - 15, text=label, font=("Helvetica", 8)
-        )
-
-        self.anim_running = True
-        # Store delta as tag (for direction)
-        self.canvas.itemconfig(self.current_ball, tags=("ball", str(dx)))
-        self.canvas.itemconfig(self.current_ball_text, tags=("ball_text", str(dx)))
-
-    def _animation_step(self):
-        """
-        Called every 40 ms: moves current ball or starts the next one.
-        """
-        if self.anim_running and self.current_ball is not None:
-            x1, y1, x2, y2 = self.canvas.coords(self.current_ball)
-            line_x1, _, line_x2, _ = self.canvas.coords(self.line_id)
-            tags = self.canvas.gettags(self.current_ball)
-            dx = int(tags[1]) if len(tags) > 1 else 6
-
-            # Move until reaching the other side
-            if (dx > 0 and x2 < line_x2) or (dx < 0 and x1 > line_x1):
-                self.canvas.move(self.current_ball, dx, 0)
-                self.canvas.move(self.current_ball_text, dx, 0)
-            else:
-                # Reached the target → clear and stop
-                self.canvas.delete(self.current_ball)
-                self.canvas.delete(self.current_ball_text)
-                self.current_ball = None
-                self.current_ball_text = None
-                self.anim_running = False
-
-        # If no animation is running and there is a queued item → start it
-        if not self.anim_running and not self.anim_queue.empty():
-            item = self.anim_queue.get_nowait()
-            self._start_next_ball(item)
-
-        # Schedule next step
-        self.after(40, self._animation_step)
-
-
-# ===================================================================== #
-#  SINGLE CLIENT WINDOW (LOCAL FORM + LOG PANEL)
-# ===================================================================== #
-
-class SingleClientGUI(ttk.Frame):
-    """
-    UI for a single endpoint (ClientA or ClientB).
-
-    Layout:
-      - Top: packet animation (TrafficCanvas)
-      - Middle: packet control (DATA length input)
-      - Bottom: local log area
+    Manual GUI:
+      - Your turn: enter seq/ack/rwnd/len and click SEND
+      - On DATA receive: dialog -> SEND ERROR or ACCEPT
+      - Log panel for events
     """
 
     def __init__(self, root: tk.Tk, role: str):
-        super().__init__(root, padding=10)
-
+        super().__init__(root, padding=12)
         self.root = root
         self.role = role
-        self.min_size = MIN_SEGMENT_SIZE
-        self.max_size = MAX_SEGMENT_SIZE
 
-        # Resolve peer name from config
-        self.peer_name = ROLE_B_NAME if role == ROLE_A_NAME else ROLE_A_NAME
+        # Thread-safe request channel (Game thread -> UI thread)
+        self._ui_requests: "queue.Queue[dict]" = queue.Queue()
 
-        self._length_queue: "queue.Queue[int]" = queue.Queue()
+        # Blocking wait objects (Game thread waits, UI resolves)
+        self._need_packet_event = threading.Event()
+        self._packet_result: dict | None = None
+
+        self._need_decision_event = threading.Event()
+        self._decision_result: bool | None = None  # True => send ERROR, False => accept
 
         self._build_ui()
-
-    # ------------------------------------------------------------------ #
-    #  UI setup
-    # ------------------------------------------------------------------ #
-
-    def _build_ui(self):
-        self.root.title(f"TCP Game – {self.role}")
-        self.root.geometry("900x600")
-
-        # Header
-        header = ttk.Label(
-            self,
-            text=f"TCP Game – {self.role}",
-            font=("Helvetica", 16, "bold"),
-        )
-        header.pack(anchor="center", pady=(0, 4))
-
-        sub = ttk.Label(
-            self,
-            text=(
-                f"This window represents one endpoint. LOCAL side: {self.role}.\n"
-                f"The left box is LOCAL, the right box is PEER ({self.peer_name}). "
-                f"The moving ball between them visualizes the TCP packet flow."
-            ),
-            justify="center",
-        )
-        sub.pack(pady=(0, 10))
-
-        # Top: animation area
-        self.traffic = TrafficCanvas(self, local_name=self.role, peer_name=self.peer_name)
-        self.traffic.pack(fill="x", pady=(0, 8))
-
-        # Middle: Packet Control
-        mid_frame = ttk.LabelFrame(self, text="Packet Control", padding=10)
-        mid_frame.pack(fill="x", pady=(4, 8))
-
-        inner = ttk.Frame(mid_frame)
-        inner.pack(fill="x")
-
-        info = ttk.Label(
-            inner,
-            text=(
-                f"DATA length: {self.min_size}-{self.max_size}\n"
-                f"0 = send ACK only (no DATA)"
-            ),
-            justify="left",
-        )
-        info.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
-
-        self.length_var = tk.StringVar()
-        entry = ttk.Entry(inner, textvariable=self.length_var, width=10, justify="center")
-        entry.grid(row=1, column=0, padx=(0, 8))
-        entry.focus_set()
-
-        send_btn = ttk.Button(inner, text="Send", command=self._on_send_clicked)
-        send_btn.grid(row=1, column=1, padx=(0, 8))
-
-        self.last_len_var = tk.StringVar(value="Last entered length = -")
-        last_lbl = ttk.Label(inner, textvariable=self.last_len_var)
-        last_lbl.grid(row=1, column=2, sticky="w")
-
-        # Bottom: Local Info (log panel)
-        bottom = ttk.LabelFrame(self, text="Local Info", padding=8)
-        bottom.pack(fill="both", expand=True)
-
-        self.log = tk.Text(bottom, height=14, wrap="word")
-        self.log.pack(fill="both", expand=True)
-        self.log.insert("end", "GUI initialized. Waiting for game loop...\n")
-        self.log.configure(state="disabled")
-
         self.pack(fill="both", expand=True)
 
-    # ------------------------------------------------------------------ #
-    #  User events
-    # ------------------------------------------------------------------ #
+        # UI poll loop (handles requests from game thread safely)
+        self.root.after(50, self._poll_requests)
 
-    def _on_send_clicked(self):
-        text = self.length_var.get().strip()
+    # ---------------- UI BUILD ----------------
 
-        if text == "":
-            length = 1
-        else:
-            try:
-                length = int(text)
-            except ValueError:
-                messagebox.showerror(
-                    "Invalid value",
-                    "Please enter a numeric value (0, 1, 2, 3 ...).",
-                )
-                return
+    def _build_ui(self):
+        self.root.title(f"TCP Game (Manual) - {self.role}")
+        self.root.geometry("920x620")
 
-        if length < 0:
-            messagebox.showerror(
-                "Invalid value",
-                "Negative length is not allowed.",
-            )
-            return
+        title = ttk.Label(self, text=f"TCP Game – {self.role} (MANUAL)", font=("Helvetica", 16, "bold"))
+        title.pack(anchor="center", pady=(0, 8))
 
-        if length != 0 and (length < self.min_size or length > self.max_size):
-            messagebox.showerror(
-                "Invalid value",
-                f"Length must be between {self.min_size}-{self.max_size} "
-                f"or 0 for ACK-only.",
-            )
-            return
+        self.status_var = tk.StringVar(value="Status: Waiting...")
+        status = ttk.Label(self, textvariable=self.status_var)
+        status.pack(anchor="center", pady=(0, 10))
 
-        # Valid input
-        self._length_queue.put(length)
-        self.last_len_var.set(f"Last entered length = {length}")
-        self.length_var.set("")
+        # Packet entry panel
+        form = ttk.LabelFrame(self, text="Send Packet (Manual)", padding=10)
+        form.pack(fill="x", pady=(0, 10))
 
-        self.append_log(f"User input: length={length}")
+        grid = ttk.Frame(form)
+        grid.pack(fill="x")
 
-    # ------------------------------------------------------------------ #
-    #  API used by GameLogic
-    # ------------------------------------------------------------------ #
+        self.seq_var = tk.StringVar()
+        self.ack_var = tk.StringVar()
+        self.rwnd_var = tk.StringVar()
+        self.len_var = tk.StringVar()
 
-    def get_next_length_blocking(self) -> int:
-        """Block until the user provides a length."""
-        return self._length_queue.get()
+        def add_row(r, label, var, hint):
+            ttk.Label(grid, text=label, width=10).grid(row=r, column=0, sticky="w", padx=(0, 8), pady=4)
+            e = ttk.Entry(grid, textvariable=var, width=18)
+            e.grid(row=r, column=1, sticky="w", pady=4)
+            ttk.Label(grid, text=hint).grid(row=r, column=2, sticky="w", padx=(10, 0), pady=4)
+            return e
 
-    def append_log(self, text: str):
+        self.seq_entry = add_row(0, "SEQ", self.seq_var, ">= 0")
+        self.ack_entry = add_row(1, "ACK", self.ack_var, ">= 0")
+        self.rwnd_entry = add_row(2, "RWND", self.rwnd_var, f"0..{MAX_RWND}")
+        self.len_entry = add_row(3, "LEN", self.len_var, f"0(ACK-only) or {MIN_SEGMENT_SIZE}..{MAX_SEGMENT_SIZE}")
+
+        btn_row = ttk.Frame(form)
+        btn_row.pack(fill="x", pady=(8, 0))
+
+        self.send_btn = ttk.Button(btn_row, text="SEND", command=self._on_send_clicked)
+        self.send_btn.pack(side="left")
+
+        ttk.Button(btn_row, text="Clear", command=self._clear_fields).pack(side="left", padx=(8, 0))
+
+        self._set_send_enabled(False)
+
+        # Log panel
+        logs = ttk.LabelFrame(self, text="Log", padding=10)
+        logs.pack(fill="both", expand=True)
+
+        self.log = tk.Text(logs, wrap="word", height=18)
+        self.log.pack(fill="both", expand=True)
+        self._append_log("GUI ready.\n")
+
+    # ---------------- Helpers ----------------
+
+    def _append_log(self, text: str):
         self.log.configure(state="normal")
         self.log.insert("end", text + "\n")
         self.log.see("end")
         self.log.configure(state="disabled")
 
-    # Convenience methods for animation
-    def animate_send(self, pkt: Packet):
-        self.traffic.enqueue_packet(
-            direction="outgoing",
-            kind=pkt.type,
-            seq=pkt.seq,
-            ack=pkt.ack,
-            length=pkt.length,
+    def _clear_fields(self):
+        self.seq_var.set("")
+        self.ack_var.set("")
+        self.rwnd_var.set("")
+        self.len_var.set("")
+
+    def _set_send_enabled(self, enabled: bool):
+        state = "normal" if enabled else "disabled"
+        for w in (self.seq_entry, self.ack_entry, self.rwnd_entry, self.len_entry, self.send_btn):
+            w.configure(state=state)
+
+    def _parse_int(self, name: str, value: str) -> int:
+        try:
+            return int(value.strip())
+        except Exception:
+            raise ValueError(f"{name} must be an integer.")
+
+    # ---------------- UI events ----------------
+
+    def _on_send_clicked(self):
+        # Only valid when game requested packet
+        try:
+            seq = self._parse_int("SEQ", self.seq_var.get())
+            ack = self._parse_int("ACK", self.ack_var.get())
+            rwnd = self._parse_int("RWND", self.rwnd_var.get())
+            length = self._parse_int("LEN", self.len_var.get())
+        except ValueError as e:
+            messagebox.showerror("Invalid input", str(e))
+            return
+
+        # Soft bounds (manuel oyunda hataya izin var ama aşırı değerleri sınırlıyoruz)
+        if seq < 0: seq = 0
+        if ack < 0: ack = 0
+        if rwnd < 0: rwnd = 0
+        if rwnd > MAX_RWND: rwnd = MAX_RWND
+
+        if length < 0:
+            length = 0
+        if length != 0:
+            if length < MIN_SEGMENT_SIZE: length = MIN_SEGMENT_SIZE
+            if length > MAX_SEGMENT_SIZE: length = MAX_SEGMENT_SIZE
+
+        self._packet_result = {"seq": seq, "ack": ack, "rwnd": rwnd, "length": length}
+        self._append_log(f"[INPUT] seq={seq}, ack={ack}, rwnd={rwnd}, len={length}")
+        self.status_var.set("Status: Packet submitted. Waiting...")
+        self._set_send_enabled(False)
+
+        # Unblock game thread
+        self._need_packet_event.set()
+
+    # ---------------- Requests from game thread ----------------
+
+    def request_packet_input(self):
+        """Called from game thread: ask UI to enable form and wait."""
+        self._need_packet_event.clear()
+        self._packet_result = None
+        self._ui_requests.put({"type": "need_packet"})
+        self._need_packet_event.wait()
+        assert self._packet_result is not None
+        return self._packet_result
+
+    def request_error_decision(self, pkt: Packet, is_valid: bool, reason: str) -> bool:
+        """Called from game thread: ask UI for ERROR vs ACCEPT decision and wait."""
+        self._need_decision_event.clear()
+        self._decision_result = None
+        self._ui_requests.put(
+            {"type": "need_decision", "pkt": pkt, "is_valid": is_valid, "reason": reason}
         )
+        self._need_decision_event.wait()
+        assert self._decision_result is not None
+        return self._decision_result
 
-    def animate_recv(self, pkt: Packet):
-        self.traffic.enqueue_packet(
-            direction="incoming",
-            kind=pkt.type,
-            seq=pkt.seq,
-            ack=pkt.ack,
-            length=pkt.length,
+    def notify_send(self, pkt: Packet):
+        """Called from game thread: log send."""
+        self._ui_requests.put({"type": "log", "text": f"SEND → {pkt.type} | s={pkt.seq} a={pkt.ack} w={pkt.rwnd} len={pkt.length}"})
+
+    def notify_recv(self, pkt: Packet):
+        """Called from game thread: log recv."""
+        self._ui_requests.put({"type": "log", "text": f"RECV ← {pkt.type} | s={pkt.seq} a={pkt.ack} w={pkt.rwnd} len={pkt.length}"})
+
+    # ---------------- UI polling loop ----------------
+
+    def _poll_requests(self):
+        try:
+            while True:
+                item = self._ui_requests.get_nowait()
+                t = item.get("type")
+
+                if t == "need_packet":
+                    self.status_var.set("Status: Your turn! Enter seq/ack/rwnd/len and press SEND.")
+                    self._set_send_enabled(True)
+                    self.seq_entry.focus_set()
+
+                elif t == "need_decision":
+                    pkt: Packet = item["pkt"]
+                    is_valid: bool = item["is_valid"]
+                    reason: str = item["reason"]
+                    self._show_decision_dialog(pkt, is_valid, reason)
+
+                elif t == "log":
+                    self._append_log(item["text"])
+
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(50, self._poll_requests)
+
+    def _show_decision_dialog(self, pkt: Packet, is_valid: bool, reason: str):
+        """
+        Modal dialog: SEND ERROR vs ACCEPT
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Incoming DATA – Decision")
+        dlg.geometry("520x260")
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Incoming DATA received", font=("Helvetica", 12, "bold")).pack(anchor="w")
+        ttk.Separator(frm).pack(fill="x", pady=8)
+
+        details = (
+            f"seq={pkt.seq} | ack={pkt.ack} | rwnd={pkt.rwnd} | len={pkt.length}\n\n"
+            f"Validator hint: {'VALID' if is_valid else 'INVALID'}\n"
+            f"Reason: {reason}"
         )
+        ttk.Label(frm, text=details, justify="left").pack(anchor="w")
+
+        ttk.Separator(frm).pack(fill="x", pady=10)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+
+        def choose(send_error: bool):
+            self._decision_result = send_error
+            self._append_log(f"[DECISION] {'SEND ERROR' if send_error else 'ACCEPT'} for incoming DATA")
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+            self._need_decision_event.set()
+
+        ttk.Button(btns, text="ACCEPT (continue)", command=lambda: choose(False)).pack(side="left")
+        ttk.Button(btns, text="SEND ERROR", command=lambda: choose(True)).pack(side="left", padx=(10, 0))
+
+        dlg.protocol("WM_DELETE_WINDOW", lambda: choose(False))
 
 
-# ===================================================================== #
-#  GAME LOGIC + GUI INTEGRATION
-# ===================================================================== #
+# ============================================================
+# GameLogic wrapper: connect UI providers + log hooks
+# ============================================================
 
-class GameLogicGUI(GameLogic):
-    """
-    GameLogic + single-window GUI integration.
-
-    - _create_next_data_packet: gets DATA length from the GUI.
-    - _send_packet / _receive_packet: add logging + animation hooks.
-    """
-
-    def __init__(self, role_name, conn, starts_first, ui: SingleClientGUI):
-        super().__init__(role_name, conn, starts_first)
+class GameLogicManualGUI(GameLogic):
+    def __init__(self, role_name, conn, starts_first, ui: ManualClientGUI):
+        super().__init__(
+            role_name=role_name,
+            conn=conn,
+            starts_first=starts_first,
+            manual_packet_provider=ui.request_packet_input,
+            error_decision_provider=ui.request_error_decision,
+        )
         self.ui = ui
 
-    # ---- SENDER SIDE ----------------------------------------------------
-
-    def _create_next_data_packet(self) -> Packet:
-        """
-        Overridden version that gets input from the GUI instead of CLI.
-        """
-        while True:
-            length = self.ui.get_next_length_blocking()
-
-            # 0 → send ACK-only (no DATA)
-            if length == 0:
-                ack = self.validator.peer.last_seq + self.validator.peer.last_len
-                rwnd = self.current_rwnd
-                pkt = Packet.make_ack(
-                    seq=self.gbn.state.next_seq,
-                    ack=ack,
-                    rwnd=rwnd,
-                    comment="GUI ACK-only",
-                )
-                self.ui.append_log(
-                    f"Preparing ACK-only packet: seq={pkt.seq}, ack={pkt.ack}, rwnd={pkt.rwnd}"
-                )
-                return pkt
-
-            # Normal DATA
-            try:
-                seq, real_length = self.gbn.next_data_segment(length=length)
-            except RuntimeError:
-                # Send ACK-only when window is full
-                ack = self.validator.peer.last_seq + self.validator.peer.last_len
-                rwnd = self.current_rwnd
-                pkt = Packet.make_ack(
-                    seq=self.gbn.state.next_seq,
-                    ack=ack,
-                    rwnd=rwnd,
-                    comment="Window full, ACK-only (GUI)",
-                )
-                self.ui.append_log(
-                    "Window full → sending ACK-only instead of DATA."
-                )
-                return pkt
-
-            ack = self.validator.peer.last_seq + self.validator.peer.last_len
-            rwnd = self.current_rwnd
-            self.ui.append_log(
-                f"Preparing DATA packet: seq={seq}, len={real_length}, ack={ack}, rwnd={rwnd}"
-            )
-            return Packet.data(seq=seq, ack=ack, rwnd=rwnd, length=real_length)
-
     def _send_packet(self, pkt: Packet):
-        # Log + animation first
-        self.ui.append_log(
-            f"SEND → {pkt.type} | seq={pkt.seq}, ack={pkt.ack}, rwnd={pkt.rwnd}, len={pkt.length}"
-        )
-        self.ui.animate_send(pkt)
-        # Then call original behavior
+        self.ui.notify_send(pkt)
         super()._send_packet(pkt)
-
-    # ---- RECEIVER SIDE --------------------------------------------------
 
     def _receive_packet(self) -> Packet:
         pkt = super()._receive_packet()
-        self.ui.append_log(
-            f"RECV ← {pkt.type} | seq={pkt.seq}, ack={pkt.ack}, rwnd={pkt.rwnd}, len={pkt.length}"
-        )
-        self.ui.animate_recv(pkt)
+        self.ui.notify_recv(pkt)
         return pkt
 
 
-# ===================================================================== #
-#  PUBLIC ENTRY POINT
-# ===================================================================== #
+# ============================================================
+# Public entry point
+# ============================================================
 
 def run_gui_client(role: str, conn, starts_first: bool):
-    """
-    Entry point used by client_A.py and client_B.py.
-
-    Each process opens its own window representing one TCP endpoint.
-    """
     root = tk.Tk()
-    ui = SingleClientGUI(root, role=role)
-    game = GameLogicGUI(role, conn, starts_first, ui)
+    ui = ManualClientGUI(root, role=role)
+    game = GameLogicManualGUI(role, conn, starts_first, ui)
 
     t = threading.Thread(target=game.run, daemon=True)
     t.start()
