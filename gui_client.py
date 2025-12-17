@@ -264,30 +264,44 @@ class SingleClientGUI(ttk.Frame):
         self.current_mode = mode
         
         if mode == "SENDING":
-            self.mode_label.config(text="🚀 YOUR TURN: Send a packet", foreground="green")
+            # Sıra bizde: Yeni paket yollama
+            self.mode_label.config(text="🚀 YOUR TURN: Send a packet", foreground="#27AE60") # Yeşil
             self.info_label.config(text="Fill all 4 fields and click SEND")
             self.error_btn.config(state="disabled")
             self.send_btn.config(state="normal")
             
         elif mode == "RESPONDING":
-            msg = message if message else "Received packet from peer"
-            self.mode_label.config(text=f"⚠️  RESPOND: {msg}", foreground="orange")
+            # Sıra bizde: Gelen pakete yanıt verme
+            msg = message if message else "Packet received!"
+            # İSTEK: Sıra bizdeyse her zaman YEŞİL ve YOUR TURN yazsın
+            self.mode_label.config(text=f"🚀 YOUR TURN: {msg}", foreground="#27AE60") # Yeşil
             self.info_label.config(text="Click SEND to respond or ERROR to reject")
             self.error_btn.config(state="normal")
             self.send_btn.config(state="normal")
 
+        elif mode == "WAITING":
+            # Sıra rakipte: Bekleme modu
+            self.mode_label.config(text="⏳ WAITING for peer...", foreground="#E67E22") # Turuncu
+            self.info_label.config(text="Please wait for the opponent's move")
+            self.error_btn.config(state="disabled")
+            self.send_btn.config(state="disabled")
+
     def show_incoming_packet(self, pkt: Packet):
-        if pkt.type == "ERROR":
-            text = "❌ ERROR received from peer"
-            color = "red"
-        else:
-            text = f"📥 Type={pkt.type} | seq={pkt.seq}, ack={pkt.ack}, rwnd={pkt.rwnd}, len={pkt.length}"
-            color = "darkblue"
+        def _update_ui():
+            if pkt.type == "ERROR":
+                text = "❌ ERROR received from peer"
+                color = "red"
+            else:
+                text = f"📥 Type={pkt.type} | seq={pkt.seq}, ack={pkt.ack}, rwnd={pkt.rwnd}, len={pkt.length}"
+                color = "darkblue"
+            
+            self.incoming_label.config(text=text, foreground=color)
+            self.incoming_packet = pkt
+            self.append_log(f"\n{'='*60}\n{text}\n{'='*60}")
+            self.set_mode("RESPONDING", "Packet received!")
         
-        self.incoming_label.config(text=text, foreground=color)
-        self.incoming_packet = pkt
-        self.append_log(f"\n{'='*60}\n{text}\n{'='*60}")
-        self.set_mode("RESPONDING", "Packet received!")
+        # UI güncellemesini main thread'in event queue'suna ekle
+        self.root.after(0, _update_ui)
 
     def append_log(self, text: str):
         self.log.configure(state="normal")
@@ -338,10 +352,8 @@ class GameLogicGUI(GameLogic):
         if starts_first:
             self.ui.set_mode("SENDING")
         else:
-            # ClientB başlangıçta beklemede, GUI'de butonları devre dışı bırak
-            self.ui.set_mode("RESPONDING", "Waiting for peer...")
-            self.ui.send_btn.config(state="disabled")
-            self.ui.error_btn.config(state="disabled")
+            # ClientB başlangıçta beklemede (WAITING modu)
+            self.ui.set_mode("WAITING", "Waiting for peer...")
     
     def _get_user_decision_for_incoming(self) -> dict:
         return self.ui.get_input_blocking()
@@ -360,7 +372,6 @@ class GameLogicGUI(GameLogic):
                 comment="ERROR pressed during send",
             )
         
-        # Normal paket oluştur (_create_response_packet_from_input ile aynı mantık)
         return self._create_response_packet_from_input(user_input)
 
     def _send_packet(self, pkt: Packet):
@@ -369,30 +380,31 @@ class GameLogicGUI(GameLogic):
         super()._send_packet(pkt)
         # Skorları güncelle
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
+        
+        # EKLENEN KISIM: Paket yolladık, artık sıra rakipte -> WAITING
+        self.ui.set_mode("WAITING")
 
     def _receive_packet(self) -> Packet:
         pkt = super()._receive_packet()
         self.ui.append_log(f"[RECV] {pkt.type} | s={pkt.seq}, a={pkt.ack}, w={pkt.rwnd}, len={pkt.length}")
         self.ui.animate_recv(pkt)
+        
+        # show_incoming_packet içinde zaten "RESPONDING" (Yeşil) moda geçiliyor
         self.ui.show_incoming_packet(pkt)
+        
         # Skorları güncelle
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         return pkt
     
     def _create_response_packet_from_input(self, user_input: dict):
-        """Skor değişikliklerini yakalamak için override"""
         result = super()._create_response_packet_from_input(user_input)
-        # Paket oluşturulduktan sonra skorları güncelle
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         return result
     
     def _respond_to_incoming(self, pkt):
-        """Skor değişikliklerini yakalamak için override"""
         result = super()._respond_to_incoming(pkt)
-        # Yanıt verildikten sonra skorları güncelle
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         return result
-
 
 def run_gui_client(role: str, conn, starts_first: bool):
     root = tk.Tk()

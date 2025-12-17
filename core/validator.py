@@ -19,12 +19,6 @@ class PeerState:
 class PacketValidator:
     """
     Basit mantıksal tutarlılık kontrolleri.
-
-    NOT:
-    - Bu sınıf tam bir TCP implementation'ı DEĞİL.
-    - Oyunun sonsuz ERROR döngüsüne girmemesi için
-      Go-Back-N senaryosundaki *retransmission/duplicate segment*'leri
-      HATA olarak değil, "valid ama eski paket" olarak kabul ediyoruz.
     """
 
     def __init__(self) -> None:
@@ -47,13 +41,25 @@ class PacketValidator:
             return False, "Unknown packet type"
 
         if pkt.type == "ERROR":
-            # ERROR paketini yapısal olarak her zaman kabul ediyoruz.
-            # Oyun mantığı bu bilgiyi ayrıca işleyecek.
             return True, "Peer reports ERROR"
 
         # rwnd range
         if pkt.rwnd is None or pkt.rwnd < 0 or pkt.rwnd > MAX_RWND:
-            return False, "Invalid rwnd"
+            return False, "Invalid rwnd (out of 0-50 range)"
+
+        # ---------------------- İMKANSIZ RWND KONTROLÜ ---------------------- #
+        # Mantık: Karşı tarafın buffer'ı, bizim gönderdiğimiz veriden daha fazla dolamaz.
+        # Örneğin biz toplam 10 byte yolladıysak (last_sent_seq=10), 
+        # karşı tarafın rwnd değeri en az 40 olabilir (50 - 10). 
+        # Eğer karşı taraf rwnd=30 derse (20 byte dolu), bu imkansızdır.
+        # (Bu kontrol özellikle oyunun başlarında kritiktir)
+        
+        min_possible_rwnd = max(0, MAX_RWND - last_sent_seq)
+        
+        if pkt.rwnd < min_possible_rwnd:
+            return False, f"Impossible rwnd: {pkt.rwnd} (sent {last_sent_seq} bytes, min expected {min_possible_rwnd})"
+
+        # -------------------------------------------------------------------- #
 
         # length rules
         if pkt.length is None or pkt.length < 0:
@@ -70,51 +76,23 @@ class PacketValidator:
         if pkt.ack is None or pkt.ack < 0:
             return False, "Invalid ack"
 
-        # ACK bizim göndermediğimiz bir şeyi onaylayamaz
         if pkt.ack > last_sent_seq:
             return False, "ACK acknowledges unsent data"
         
-        # ---------------------- ACK doğruluğu kontrolü ---------------------- #
-        # Eğer biz veri göndermişsek (last_sent_seq > 0), gelen ACK doğru olmalı
-        # Expected ACK = bizim son gönderdiğimiz seq + length
-        if last_sent_seq > 0:
-            # Karşı taraf bizim gönderdiğimiz veriyi acknowledge etmeli
-            # ACK değeri last_sent_seq'e eşit olmalı (cumulative acknowledgment)
-            # Çünkü biz sırayla gönderiyoruz ve karşı taraf hepsini almış olmalı
-            
-            # DATA veya ACK paketlerinde ack alanı kontrol edilmeli
-            if pkt.ack != last_sent_seq:
-                return False, f"Incorrect ACK value: got {pkt.ack}, expected {last_sent_seq}"
+        if last_sent_seq > 0 and pkt.ack != last_sent_seq:
+             return False, f"Incorrect ACK value: got {pkt.ack}, expected {last_sent_seq}"
 
-        # ---------------------- Go-Back-N / retransmission -------------------- #
-        # Burada asıl kritik kısım:
-        # - expected_seq: sırayla ve hatasız gittiğimizde beklediğimiz next seq
-        # - GBN'de timeout olduğunda gönderici base'den itibaren tekrar
-        #   gönderim yapacağından seq geri gelebilir (retransmission).
-        #
-        # Bu durumu "protocol error" olarak değil,
-        # "eski veya tekrar gönderilen segment" olarak kabul ediyoruz.
-
+        # Go-Back-N kontrolleri (Eski paketler)
         if pkt.seq < self.peer.expected_seq:
-            # Beklediğimiz seq'ten küçük -> eski veya retransmitted segment
-            # State'i agresif şekilde değiştirmiyoruz; sadece ack/rwnd'i güncellemek güvenli.
             self.peer.last_ack = pkt.ack
             self.peer.last_rwnd = pkt.rwnd
-            # expected_seq'i değiştirmiyoruz ki ileride gelen yeni seq'leri
-            # doğru şekilde değerlendirebilelim.
             return True, "Old or retransmitted segment"
         
-        # ---------------------- Seq atlaması kontrolü ---------------------- #
-        # Eğer seq expected_seq'ten büyükse, bir paket atlandı demektir
-        # TCP'de paketler sırayla gelmeli (bizim oyunumuzda)
+        # Seq Gap kontrolü
         if pkt.seq > self.peer.expected_seq:
             return False, f"Sequence number gap: got {pkt.seq}, expected {self.peer.expected_seq}"
 
-        # ---------------------- Normal, ileri yönde ilerleme ------------------ #
-        # Buraya geliyorsak:
-        # - seq >= expected_seq
-        # - Yapısal olarak da her şey yolunda → paketi kabul ediyoruz.
-
+        # State güncelleme
         self.peer.last_seq = pkt.seq
         self.peer.last_len = pkt.length
         self.peer.last_ack = pkt.ack

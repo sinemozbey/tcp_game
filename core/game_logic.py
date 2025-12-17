@@ -108,11 +108,42 @@ class GameLogic:
                 self.last_sent_seq = end_seq
 
     def _receive_packet(self) -> Packet:
+        """
+        Soketten paketi okur ve SKOR SENKRONİZASYONUNU anında yapar.
+        """
+        # Paketi ham olarak al
         raw = self.conn.recv_json(timeout=RESPONSE_TIMEOUT_SECONDS)
         pkt = Packet.from_json(raw["packet"])
+        
         self.logger.info(f"Received: {pkt}")
         self._record_event("Peer", self.role, pkt, pkt.type)
         self.last_activity_time = time.time()
+
+        # ================================================================== #
+        # SKOR SENKRONİZASYONU (BURAYA TAŞINDI)
+        # ================================================================== #
+        # Paketi alır almaz içindeki notları (comment) işle.
+        # Böylece GUI, kullanıcıdan henüz input beklemeden skoru güncelleyebilir.
+        
+        incoming_comment = (pkt.comment or "").upper()
+
+        if "MISSED_ERROR" in incoming_comment:
+            # Biz hatalı yollamışız, rakip yemiş (kabul etmiş). Biz kazanırız.
+            self.scoreboard.my_score += 1
+            self.logger.info("🏆 Peer accepted our INVALID packet (Missed Error) → My Score +1")
+
+        elif "FALSE" in incoming_comment and pkt.type == "ERROR":
+            # Biz doğru yollamışız, rakip yanlış alarm vermiş. Rakip kaybeder.
+            self.scoreboard.opponent_score -= 1
+            self.logger.info("⬇️ Opponent sent False Alarm (Invalid ERROR) → Opponent -1")
+
+        elif "CORRECT" in incoming_comment and pkt.type == "ERROR":
+            # Biz hatalı yollamışız, rakip yakalamış. Rakip kazanır.
+            self.scoreboard.opponent_score += 1
+            self.logger.info("❌ Opponent detected our error (Correct ERROR) → Opponent +1")
+        
+        # ================================================================== #
+
         return pkt
 
     # --- Packet creation (user controlled) ---------------------------
@@ -129,143 +160,93 @@ class GameLogic:
 
     def _respond_to_incoming(self, pkt: Packet) -> bool:
         """
-        Peer'den paket geldiğinde kullanıcıya göster ve kararını bekle.
-        
-        Dönüş: True ise sıra bize geçti (paket göndereceğiz), False ise bekleyeceğiz
+        Gelen paketi işle, skoru güncelle ve karşı tarafa durumu bildir.
         """
+        # ... (Önceki skor senkronizasyon kodları buraya gelecek - aynı kalıyor) ...
 
-        # 1) ERROR paketi geldiyse
-        if pkt.type == "ERROR":
-            self.logger.warning("Peer reported ERROR for our packet.")
-            self.logger.info("Our last packet was rejected. We should resend.")
-            
-            # Karşı taraf bizim paketimizi reddetti
-            # Biz önceki paketimizi tekrar göndereceğiz (kullanıcı tekrar girecek)
-            # Sıra bizde
-            return True
+        # ================================================================== #
+        # ADIM 1: GELEN PAKETİN GEÇERLİLİĞİNİ KONTROL ET
+        # ================================================================== #
+        
+        # DATA paketleri için rwnd=0 ihlali kontrolü
+        if pkt.type == "DATA" and self.current_rwnd == 0:
+            self.logger.warning("Peer sent DATA while rwnd=0 → AUTOMATIC ERROR")
+            self.scoreboard.detected_error()
+            err = Packet.error(comment="CORRECT: DATA sent while advertised rwnd=0")
+            self._send_packet(err)
+            return False
 
-        # 2) ACK paketi → validate et ve GBN'i güncelle
-        if pkt.type == "ACK":
-            self.logger.info("Received ACK from peer.")
-            
-            # ACK paketini validate et
-            is_valid, reason = self.validator.validate(pkt, last_sent_seq=self.last_sent_seq)
-            self.logger.info(f"ACK Validation: valid={is_valid}, reason={reason}")
-            
-            # Kullanıcıdan karar al: ERROR mi SEND mi?
-            user_decision = self._get_user_decision_for_incoming()
-            
-            if user_decision["action"] == "ERROR":
-                # Kullanıcı ERROR bastı
-                err = Packet.error(comment="User detected error in ACK")
-                self._send_packet(err)
-                
-                if not is_valid:
-                    # Paket gerçekten geçersizdi → +1 puan
-                    self.scoreboard.detected_error()
-                    self.logger.info("✅ Correct! Error detected in ACK → +1 point")
-                else:
-                    # Paket geçerliydi ama kullanıcı ERROR bastı → -1 puan
-                    self.scoreboard.my_score -= 1
-                    self.logger.warning("⚠️ User pressed ERROR but ACK was valid → -1 point")
-                # ERROR gönderdik, karşı taraf tekrar gönderecek, biz bekleyeceğiz
-                return False
-            
-            # Kullanıcı SEND bastı (ACK'yi kabul etti)
+        # Standart Validator kontrolü
+        is_valid, reason = self.validator.validate(pkt, last_sent_seq=self.last_sent_seq)
+        self.logger.info(f"Validation Check: valid={is_valid}, reason={reason}")
+
+        # ================================================================== #
+        # ADIM 2: KULLANICI KARARINI AL VE YANIT OLUŞTUR
+        # ================================================================== #
+        
+        user_decision = self._get_user_decision_for_incoming()
+        outgoing_comment_flag = ""
+
+        if user_decision["action"] == "ERROR":
+             # ... (Hata işleme mantığı aynı kalıyor) ...
+             if not is_valid:
+                self.scoreboard.detected_error()
+                outgoing_comment_flag = "CORRECT: User detected error"
+             else:
+                self.scoreboard.my_score -= 1
+                outgoing_comment_flag = "FALSE: User pressed ERROR but packet was valid"
+             
+             err = Packet.error(comment=outgoing_comment_flag)
+             self._send_packet(err)
+             return False
+
+        else:
+            # --- KULLANICI "SEND" TUŞUNA BASTI (KABUL ETTİ) ---
             if not is_valid:
-                # ACK geçersizdi ama kullanıcı fark etmedi → rakip +1 puan
-                self.scoreboard.opponent_score += 1
-                self.logger.warning("❌ ACK was INVALID but user didn't detect → opponent +1 point")
+                self.scoreboard.opponent_score += 1 
+                outgoing_comment_flag = "MISSED_ERROR"
             
-            # GBN'i güncelle
-            if pkt.ack is not None:
-                window_advanced, retransmit_required = self.gbn.on_ack(pkt.ack)
+            # -- Protokol İşlemleri (Buffer ve Window Güncelleme) --
+            if pkt.type == "DATA":
+                # DÜZELTME: Sadece YENİ (beklenen) veri geldiğinde buffer artmalı!
+                # Eski/Tekrar paketler buffer'da yer kaplamaz (zaten oradadır).
+                if pkt.seq == self.validator.peer.expected_seq:
+                    data_len = pkt.length or 0
+                    self.recv_buffer_used += data_len
+                    
+                    if self.recv_buffer_used > MAX_RWND: 
+                        self.recv_buffer_used = MAX_RWND
+                    
+                    self.current_rwnd = MAX_RWND - self.recv_buffer_used
+                else:
+                    self.logger.info(f"Duplicate/Old data (seq={pkt.seq}), buffer not changed.")
 
-                if window_advanced:
-                    self.logger.info(
-                        f"Go-Back-N window advanced: base={self.gbn.state.base}, "
-                        f"next_seq={self.gbn.state.next_seq}"
-                    )
-
-                if retransmit_required:
-                    self.logger.warning("Go-Back-N triggered (duplicate ACK).")
-                    self._pending_retransmit = True
+                # Beklenen seq güncellemesi
+                new_ack = pkt.seq + (pkt.length or 0)
+                # Sadece ileri gidiyorsak güncelle (Validator zaten gap kontrolü yaptı)
+                if new_ack > self.validator.peer.expected_seq:
+                    self.validator.peer.expected_seq = new_ack
             
-            # Validator state'i güncelle
+            if pkt.type == "ACK":
+                if pkt.ack is not None:
+                    win_adv, retx_req = self.gbn.on_ack(pkt.ack)
+                    if retx_req: self._pending_retransmit = True
+
+            # State güncelle
             self.validator.peer.last_seq = pkt.seq
             self.validator.peer.last_len = pkt.length or 0
             self.validator.peer.last_ack = pkt.ack
             self.validator.peer.last_rwnd = pkt.rwnd
-            if pkt.ack is not None:
-                self.validator.peer.expected_seq = pkt.seq + (pkt.length or 0)
-            
-            # Yanıt paketi gönder
+
+            # Yanıt paketini oluştur
             response_pkt = self._create_response_packet_from_input(user_decision)
+            
+            if outgoing_comment_flag:
+                response_pkt.comment = f"{response_pkt.comment or ''} [{outgoing_comment_flag}]".strip()
+            
             self._send_packet(response_pkt)
-            
-            # Yanıt gönderdik, sıra karşı tarafta
             return False
-
-        # 3) rwnd=0 iken DATA geldiyse otomatik ERROR
-        if self.current_rwnd == 0 and pkt.type == "DATA":
-            self.logger.warning("Peer sent DATA while rwnd=0 → rule violation")
-            self.scoreboard.detected_error()
-            err = Packet.error(comment="DATA sent while advertised rwnd=0")
-            self._send_packet(err)
-            # ERROR gönderdik, sıra karşı tarafta
-            return False
-
-        # 4) DATA paketi → validate et (ama henüz yanıt verme!)
-        is_valid, reason = self.validator.validate(pkt, last_sent_seq=self.last_sent_seq)
-        self.logger.info(f"Validation: valid={is_valid}, reason={reason}")
-
-        # ⚠️ KULLANICIYA GÖSTER VE KARARINI BEKLE ⚠️
-        user_decision = self._get_user_decision_for_incoming()
-
-        if user_decision["action"] == "ERROR":
-            # Kullanıcı ERROR bastı
-            err = Packet.error(comment="User detected error")
-            self._send_packet(err)
-            
-            if not is_valid:
-                # Paket gerçekten geçersizdi → +1 puan
-                self.scoreboard.detected_error()
-                self.logger.info("✅ Correct! Error detected → +1 point")
-            else:
-                # Paket geçerliydi ama kullanıcı ERROR bastı → -1 puan
-                self.scoreboard.my_score -= 1
-                self.logger.warning("⚠️ User pressed ERROR but packet was valid → -1 point")
-            # ERROR gönderdik, karşı taraf tekrar gönderecek, biz bekleyeceğiz
-            return False
-
-        # Kullanıcı SEND bastı (normal yanıt gönderecek)
-        if not is_valid:
-            # Paket geçersizdi ama kullanıcı fark etmedi → rakip +1 puan
-            self.scoreboard.opponent_score += 1
-            self.logger.warning("❌ Packet was INVALID but user didn't detect → opponent +1 point")
-        
-        # Buffer ve window state'i güncelle
-        data_len = pkt.length or 0
-        self.recv_buffer_used += data_len
-        if self.recv_buffer_used > MAX_RWND:
-            self.recv_buffer_used = MAX_RWND
-        
-        self.current_rwnd = MAX_RWND - self.recv_buffer_used
-        
-        # Validator state'i güncelle
-        new_ack = pkt.seq + (pkt.length or 0)
-        self.validator.peer.last_seq = pkt.seq
-        self.validator.peer.last_len = pkt.length
-        self.validator.peer.expected_seq = new_ack
-        
-        # ⚠️ YANIT PAKETİNİ OLUŞTUR VE GÖNDER ⚠️
-        # user_decision içinde zaten seq, ack, rwnd, length bilgileri var
-        response_pkt = self._create_response_packet_from_input(user_decision)
-        self._send_packet(response_pkt)
-        
-        # Yanıt gönderdik, sıra karşı tarafta (onlar yeni paket gönderecek)
-        return False
-
+    
     def _get_user_decision_for_incoming(self) -> dict:
         """
         Gelen paket için kullanıcıdan karar al: SEND veya ERROR?
