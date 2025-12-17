@@ -9,10 +9,10 @@ BUFFER_DRAIN_INTERVAL_SECONDS = 15
 # rwnd=0 veya pencere full kaldığında verilecek maksimum tolerans: 45s
 WINDOW_STALL_TIMEOUT_SECONDS = 45
 
-MAX_RWND = 5
+MAX_RWND = 50
 TIMELINE_PLOT_FILE = "timeline.png"
 INITIAL_SEQ = 0
-WINDOW_SIZE = 4 
+WINDOW_SIZE = 10 
 
 LOG_DIR = "logs"
 

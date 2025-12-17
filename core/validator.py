@@ -73,6 +73,18 @@ class PacketValidator:
         # ACK bizim göndermediğimiz bir şeyi onaylayamaz
         if pkt.ack > last_sent_seq:
             return False, "ACK acknowledges unsent data"
+        
+        # ---------------------- ACK doğruluğu kontrolü ---------------------- #
+        # Eğer biz veri göndermişsek (last_sent_seq > 0), gelen ACK doğru olmalı
+        # Expected ACK = bizim son gönderdiğimiz seq + length
+        if last_sent_seq > 0:
+            # Karşı taraf bizim gönderdiğimiz veriyi acknowledge etmeli
+            # ACK değeri last_sent_seq'e eşit olmalı (cumulative acknowledgment)
+            # Çünkü biz sırayla gönderiyoruz ve karşı taraf hepsini almış olmalı
+            
+            # DATA veya ACK paketlerinde ack alanı kontrol edilmeli
+            if pkt.ack != last_sent_seq:
+                return False, f"Incorrect ACK value: got {pkt.ack}, expected {last_sent_seq}"
 
         # ---------------------- Go-Back-N / retransmission -------------------- #
         # Burada asıl kritik kısım:
@@ -91,6 +103,12 @@ class PacketValidator:
             # expected_seq'i değiştirmiyoruz ki ileride gelen yeni seq'leri
             # doğru şekilde değerlendirebilelim.
             return True, "Old or retransmitted segment"
+        
+        # ---------------------- Seq atlaması kontrolü ---------------------- #
+        # Eğer seq expected_seq'ten büyükse, bir paket atlandı demektir
+        # TCP'de paketler sırayla gelmeli (bizim oyunumuzda)
+        if pkt.seq > self.peer.expected_seq:
+            return False, f"Sequence number gap: got {pkt.seq}, expected {self.peer.expected_seq}"
 
         # ---------------------- Normal, ileri yönde ilerleme ------------------ #
         # Buraya geliyorsak:

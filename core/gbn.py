@@ -128,7 +128,7 @@ class GoBackN:
 
             # Çift (veya daha fazla) duplicate ACK → base'ten itibaren
             # Go-Back-N retransmission tetiklenir.
-            if self.state.duplicate_ack_count >= 2:
+            if self.state.duplicate_ack_count >= 3:
                 retransmit = True
                 # GBN mantığı: yeniden gönderilecek ilk seq = base.
                 # next_seq'i base'e çekiyoruz; dışarıdaki kod

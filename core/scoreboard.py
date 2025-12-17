@@ -18,7 +18,7 @@ class Scoreboard:
         # Opponent fails to respond within 30s → they lose 1 point (we record it as +1 to us or -1 to them?)
         # Spec says: "the side who must send a response will lose 1 point."
         # Here we treat it as: my_score += 1 (easier to reason in one place)
-        self.my_score += 1
+        self.opponent_score -= 1
 
     def my_timeout(self):
         # Our local timeout – we lose 1 point
