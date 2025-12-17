@@ -25,8 +25,8 @@ class GoBackN:
 
     Notlar (raporda da yazabilirsin):
       • Mantıksal pencere boyutu WINDOW_SIZE * segment_length byte olarak ele alınır.
-      • Duplicate ACK (aynı ACK'in art arda gelmesi) sayısı 2'ye ulaştığında
-        base'ten itibaren Go-Back-N retransmission tetiklenir.
+      • Fast retransmit: aynı ACK'in art arda gelmesi sayısı 3'e ulaştığında
+        (3 duplicate ACK) base'ten itibaren Go-Back-N retransmission tetiklenir.
     """
 
     def __init__(self, segment_length: int = 1) -> None:
@@ -126,9 +126,9 @@ class GoBackN:
             # algılanmış olabilir → sayacı arttır.
             self.state.duplicate_ack_count += 1
 
-            # Çift (veya daha fazla) duplicate ACK → base'ten itibaren
+            # 3 (veya daha fazla) duplicate ACK → base'ten itibaren
             # Go-Back-N retransmission tetiklenir.
-            if self.state.duplicate_ack_count >= 2:
+            if self.state.duplicate_ack_count >= 3:
                 retransmit = True
                 # GBN mantığı: yeniden gönderilecek ilk seq = base.
                 # next_seq'i base'e çekiyoruz; dışarıdaki kod

@@ -1,6 +1,7 @@
 # core/game_logic.py
 
 import time
+from collections import OrderedDict
 from typing import List
 
 from utils.logger import get_logger
@@ -10,6 +11,7 @@ from utils.config import (
     BUFFER_DRAIN_INTERVAL_SECONDS,
     WINDOW_STALL_TIMEOUT_SECONDS,
     MAX_RWND,
+    RWND_INCREASE_STEP,
     TIMELINE_PLOT_FILE,
     MIN_SEGMENT_SIZE,
     MAX_SEGMENT_SIZE,
@@ -69,6 +71,16 @@ class GameLogic:
         self.last_activity_time = time.time()
 
         self._pending_retransmit = False
+        # Go-Back-N için: henüz ACK almamış segmentleri (seq -> length) tut
+        self._unacked_segments: "OrderedDict[int, int]" = OrderedDict()
+        # Fast retransmit sonrası: base'ten itibaren yeniden gönderilecek segmentler
+        self._retransmit_queue: list[tuple[int, int]] = []
+        self._is_retransmitting = False
+        # Skor ve "oyuncu hilesi" değerlendirmesi için son gönderilen paket bilgisi
+        self._last_outgoing_packet: Packet | None = None
+        self._last_outgoing_intentionally_invalid: bool = False
+        self._last_outgoing_was_invalid: bool | None = None
+        self._last_outgoing_invalid_reason: str | None = None
 
         # GUI veya CLI’den uzunluk sağlayan fonksiyon
         self.length_provider = length_provider
@@ -115,18 +127,21 @@ class GameLogic:
     # --- Packet sending helpers -----------------------------------------
 
     def _send_packet(self, pkt: Packet):
+        # Track whether our last outgoing packet is structurally invalid (for scoring ERROR / undetected invalid).
+        self._last_outgoing_was_invalid, self._last_outgoing_invalid_reason = self._classify_outgoing_validity(pkt)
         self.logger.info(f"Sending: {pkt}")
         self.conn.send_json({"packet": pkt.to_json()})
         self.last_activity_time = time.time()
+        self._last_outgoing_packet = pkt
+        self._last_outgoing_intentionally_invalid = bool(
+            pkt.comment and pkt.comment.startswith("INTENTIONAL_INVALID")
+        )
 
         # Timeline için tür belirleme
         if pkt.type == "DATA":
-            # Eğer GBN duplicate ACK yüzünden retransmit tetiklediyse
-            if getattr(self, "_pending_retransmit", False):
+            # Retransmission modundaysak RETX olarak işaretle
+            if getattr(self, "_is_retransmitting", False):
                 kind = "RETX"
-                self.logger.warning(f"Retransmitting segment seq={pkt.seq}")
-                # Bir kere kullandık, flag'i sıfırla
-                self._pending_retransmit = False
             else:
                 kind = "DATA"
         elif pkt.type == "ACK":
@@ -151,6 +166,43 @@ class GameLogic:
             end_seq = pkt.seq + (pkt.length or 0)
             if end_seq > self.last_sent_seq:
                 self.last_sent_seq = end_seq
+
+        # Gönderdiğimiz DATA segmentini unacked buffer'a ekle
+        if pkt.type == "DATA" and pkt.seq is not None and (pkt.length or 0) > 0:
+            # Retransmission olsa bile aynı anahtar varsa overwrite etmeyelim
+            self._unacked_segments.setdefault(pkt.seq, pkt.length or 0)
+
+    def _classify_outgoing_validity(self, pkt: Packet) -> tuple[bool | None, str | None]:
+        """
+        Outgoing paketin 'yapısal' olarak geçerli olup olmadığını belirler.
+        Bu kontrol, peer'in tüm mantıksal validasyonunu birebir kopyalamaz; ama
+        kesin invalid durumları (rwnd aralığı, length>rwnd, negatif değerler vb.) yakalar.
+        """
+        if pkt.type == "ERROR":
+            return None, None
+
+        if pkt.type not in {"DATA", "ACK"}:
+            return True, "Unknown type"
+
+        if pkt.seq is None or pkt.seq < 0:
+            return True, "Invalid seq"
+
+        if pkt.ack is None or pkt.ack < 0:
+            return True, "Invalid ack"
+
+        if pkt.rwnd is None or pkt.rwnd < 0 or pkt.rwnd > MAX_RWND:
+            return True, "Invalid rwnd"
+
+        if pkt.length is None or pkt.length < 0:
+            return True, "Invalid length"
+
+        if pkt.length > pkt.rwnd:
+            return True, "length > rwnd"
+
+        if pkt.type == "ACK" and pkt.length != 0:
+            return True, "ACK length must be 0"
+
+        return False, None
 
     def _receive_packet(self) -> Packet:
         raw = self.conn.recv_json(timeout=RESPONSE_TIMEOUT_SECONDS)
@@ -264,18 +316,33 @@ class GameLogic:
     # Incoming packet handling
     # ------------------------------------------------------------------ #
 
-    def _respond_to_incoming(self, pkt: Packet):
+    def _respond_to_incoming(self, pkt: Packet, decision: bool | None = None) -> bool:
         """
         Peer'den bir paket geldiğinde nasıl davranacağımız:
         - ERROR      -> sadece logla ve küçük bir ACK gönder (oyun akışı için)
-        - ACK        -> SADECE Go-Back-N penceresini güncelle, CEVAP GÖNDERME
+        - ACK        -> SADECE Go-Back-N penceresini güncelle, CEVAP GÖNDERME (False döner)
         - DATA       -> validate et, geçerliyse buffer'a yaz + ACK gönder;
                         geçersizse ERROR gönder + puan.
         """
+        # Eğer önceki paketimiz kesin invalid idi ve peer ERROR göndermediyse,
+        # peer hatayı kaçırdı → biz +1 alırız.
+        if self._last_outgoing_was_invalid is True and pkt.type != "ERROR":
+            self.scoreboard.my_reward(1)
+            self._last_outgoing_was_invalid = None
+            self._last_outgoing_invalid_reason = None
 
         # 1) Peer bize ERROR gönderdiyse
         if pkt.type == "ERROR":
             self.logger.warning("Peer reported ERROR for our packet.")
+            # Scoring:
+            # - Son gönderdiğimiz paket kesin invalid ise: peer doğru yakaladı → peer +1 (bizde opponent_score++)
+            # - Değilse: peer haksız ERROR gönderdi → biz +1
+            if self._last_outgoing_was_invalid is True:
+                self.scoreboard.opponent_reward(1)
+            else:
+                self.scoreboard.my_reward(1)
+            self._last_outgoing_was_invalid = None
+            self._last_outgoing_invalid_reason = None
             # Küçük bir ACK gönderip oyunu devam ettiriyoruz
             ack_pkt = Packet.make_ack(
                 seq=self.validator.peer.expected_seq,
@@ -285,13 +352,35 @@ class GameLogic:
             )
             self._send_packet(ack_pkt)
             # Burada GBN state'ini güncellemiyoruz; bu ACK'i biz gönderiyoruz.
-            return
+            return True
 
         # 2) Peer bize ACK gönderdiyse -> SADECE pencereyi güncelle, cevap gönderme!
         if pkt.type == "ACK":
+            # Kullanıcı REJECT seçerse ERROR yollayabilir (pretend).
+            if decision is False:
+                ok, reason, _ = self.validator.peek_validate(pkt, last_sent_seq=self.last_sent_seq)
+                if ok:
+                    self.scoreboard.opponent_reward(1)
+                else:
+                    self.scoreboard.my_reward(1)
+                err = Packet.error(comment=f"User rejected ACK: {reason}")
+                self._send_packet(err)
+                return True
+
             self.logger.info("Received pure ACK from peer.")
+            ok, reason, _ = self.validator.validate(pkt, last_sent_seq=self.last_sent_seq)
+            if not ok:
+                # ACK invalid ama kabul ettik -> peer +1 (missed detection)
+                if decision is True:
+                    self.scoreboard.opponent_reward(1)
+                return False
+
             if pkt.ack is not None:
                 window_advanced, retransmit_required = self.gbn.on_ack(pkt.ack)
+
+                # ACK geldikçe unacked buffer'ı temizle
+                if window_advanced:
+                    self._drop_acked_segments(pkt.ack)
 
                 if window_advanced:
                     self.logger.info(
@@ -304,61 +393,162 @@ class GameLogic:
                         f"Go-Back-N triggered (duplicate ACK). "
                         f"Next DATA will be retransmitted from seq={self.gbn.state.base}"
                     )
-                    # Bir SONRAKİ DATA gönderiminde RETX olarak işaretle
-                    self._pending_retransmit = True
-            return
+                    self._prepare_retransmission()
+            return False
 
         # Eğer biz rwnd=0 advertise etmiş durumdaysak ve karşı taraf DATA gönderiyorsa → o kaybeder
         if self.current_rwnd == 0 and pkt.type == "DATA":
             self.logger.warning(
                 "Peer, rwnd=0 durumundayken DATA gönderdi → kural ihlali, peer puan kaybeder."
             )
-            # Biz +1 alıyoruz
-            self.scoreboard.detected_error()
+            # Doküman: bu durumda gönderen taraf puan kaybeder (biz +1 almayız)
+            self.scoreboard.opponent_penalty(1)
             err = Packet.error(comment="DATA sent while advertised rwnd=0")
             self._send_packet(err)
-            return
+            return True
 
         # 3) Geriye sadece DATA kalıyor, onu validate edeceğiz
-        is_valid, reason = self.validator.validate(pkt, last_sent_seq=self.last_sent_seq)
-        self.logger.info(f"Validation result: valid={is_valid}, reason={reason}")
+        expected_before = self.validator.peer.expected_seq
+        # Kullanıcı REJECT seçerse ERROR yolla; doğru/yanlış yakalamaya göre skorla.
+        if decision is False:
+            ok, reason, _ = self.validator.peek_validate(pkt, last_sent_seq=self.last_sent_seq)
+            if ok:
+                self.scoreboard.opponent_reward(1)
+            else:
+                self.scoreboard.my_reward(1)
+            err = Packet.error(comment=f"User rejected DATA: {reason}")
+            self._send_packet(err)
+            return True
+
+        is_valid, reason, classification = self.validator.validate(pkt, last_sent_seq=self.last_sent_seq)
+        self.logger.info(f"Validation result: valid={is_valid}, reason={reason}, class={classification}")
 
         if not is_valid:
-            # Geçersiz DATA -> ERROR gönder, +1 puan alıyoruz
-            err = Packet.error(comment=reason)
-            self._send_packet(err)
-            self.scoreboard.detected_error()
-            self.logger.info(
-                f"Error detected → score updated: {self.scoreboard.snapshot()}"
+            # Eğer kullanıcı kabul ettiyse (decision True / None) ve yine de invalid ise:
+            # peer hatasını yakalayamadık → peer +1, ama oyun devam etsin diye dup ACK gönder.
+            self.scoreboard.opponent_reward(1)
+            ack_pkt = Packet.make_ack(
+                seq=self.validator.peer.expected_seq,
+                ack=expected_before,
+                rwnd=self.current_rwnd,
+                comment=f"Accepted invalid DATA -> dup ACK ({reason})",
             )
-            return
+            self._send_packet(ack_pkt)
+            return True
 
         # ⬇️ Buradan sonrası SADECE GEÇERLİ DATA için ⬇️
-        data_len = pkt.length or 0
-        self.recv_buffer_used += data_len
-        if self.recv_buffer_used > MAX_RWND:
-            self.recv_buffer_used = MAX_RWND  # taşmayı engelle
+        # Go-Back-N receiver davranışı:
+        #   - IN_ORDER    -> buffer'a al, expected_seq ilerlet, ACK=expected_seq
+        #   - OLD/OUT_OOO -> discard, ACK=expected_before (dup ACK)
+        if classification == "IN_ORDER":
+            data_len = pkt.length or 0
+            self.recv_buffer_used += data_len
+            if self.recv_buffer_used > MAX_RWND:
+                self.recv_buffer_used = MAX_RWND  # taşmayı engelle
 
-        self.current_rwnd = MAX_RWND - self.recv_buffer_used
+            self.current_rwnd = MAX_RWND - self.recv_buffer_used
 
-        # window full mü?
-        if self.current_rwnd == 0:
-            if self.window_full_since is None:
-                self.window_full_since = time.time()
+            # window full mü?
+            if self.current_rwnd == 0:
+                if self.window_full_since is None:
+                    self.window_full_since = time.time()
+            else:
+                self.window_full_since = None  # boşaldıysa resetle
+
+            ack_num = self.validator.peer.expected_seq
+            comment = "Normal ACK (in-order)"
         else:
-            self.window_full_since = None  # boşaldıysa resetle
+            # OLD veya OUT_OF_ORDER segment -> buffer'a alma, dup ACK gönder
+            ack_num = expected_before
+            comment = f"Dup ACK ({classification})"
 
-        # Geçerli DATA paketi için normal ACK gönder
-        new_ack = pkt.seq + (pkt.length or 0)
         ack_pkt = Packet.make_ack(
             seq=self.validator.peer.expected_seq,
-            ack=new_ack,
+            ack=ack_num,
             rwnd=self.current_rwnd,
-            comment="Normal ACK",
+            comment=comment,
         )
         self._send_packet(ack_pkt)
         # DİKKAT: Burada GBN state'imizi güncellemiyoruz;
         # bizim GBN sadece ALDIĞIMIZ ACK'lerle güncellenmeli.
+        return True
+
+    # --- Go-Back-N helpers ----------------------------------------------
+
+    def _drop_acked_segments(self, ack_num: int) -> None:
+        """
+        ACK numarasına göre artık onaylanmış segmentleri buffer'dan çıkar.
+        ack_num: peer'in en son in-order aldığı byte index (exclusive).
+        """
+        while self._unacked_segments:
+            first_seq, first_len = next(iter(self._unacked_segments.items()))
+            if first_seq + first_len <= ack_num:
+                self._unacked_segments.popitem(last=False)
+            else:
+                break
+
+        # Retransmit kuyruğu varsa, artık ACK'lenmişleri çıkar
+        if self._retransmit_queue:
+            base = self.gbn.state.base
+            self._retransmit_queue = [
+                (seq, ln) for (seq, ln) in self._retransmit_queue if seq + ln > base
+            ]
+            if not self._retransmit_queue:
+                self._is_retransmitting = False
+
+    def _prepare_retransmission(self) -> None:
+        """
+        Fast retransmit tetiklendiğinde base'ten itibaren unacked segmentleri sıraya koy.
+        """
+        base = self.gbn.state.base
+        items = [(seq, ln) for (seq, ln) in self._unacked_segments.items() if seq >= base]
+        items.sort(key=lambda x: x[0])
+        self._retransmit_queue = items
+        self._is_retransmitting = bool(items)
+        # GBN'in next_seq'ini base'e çek (retransmit için)
+        self.gbn.state.next_seq = base
+
+    def _create_next_retransmit_packet(self) -> Packet:
+        """
+        Retransmission sırasında sıradaki segmenti (DATA) üret.
+        Kullanıcı girdisi almaz; daha önce gönderilmiş segmentlerin aynı uzunluklarıyla tekrar gönderir.
+        """
+        # Kuyruk boşsa fallback
+        if not self._retransmit_queue:
+            self._is_retransmitting = False
+            return self._create_next_data_packet()
+
+        # ACK ile base ilerlediyse artık geçersiz olanları düşür
+        base = self.gbn.state.base
+        while self._retransmit_queue and (self._retransmit_queue[0][0] + self._retransmit_queue[0][1] <= base):
+            self._retransmit_queue.pop(0)
+
+        if not self._retransmit_queue:
+            self._is_retransmitting = False
+            return self._create_next_data_packet()
+
+        expected_seq, length = self._retransmit_queue.pop(0)
+        seq, real_length = self.gbn.next_data_segment(length=length)
+        if seq != expected_seq:
+            # GBN state drift ettiyse hizala
+            self.logger.warning(
+                f"Retransmit seq mismatch (expected {expected_seq}, got {seq}); aligning to expected."
+            )
+            seq = expected_seq
+
+        ack = self.validator.peer.last_seq + self.validator.peer.last_len
+        rwnd = self.current_rwnd
+
+        if not self._retransmit_queue:
+            self._is_retransmitting = False
+
+        return Packet.data(
+            seq=seq,
+            ack=ack,
+            rwnd=rwnd,
+            length=real_length,
+            comment="Fast retransmit (GBN)",
+        )
 
     # --- Public game loop -----------------------------------------------
 
@@ -374,7 +564,7 @@ class GameLogic:
                 # Her BUFFER_DRAIN_INTERVAL_SECONDS saniyede bir uygulama tarafı buffer'dan veri işlesin
                 if now - self.last_window_update >= BUFFER_DRAIN_INTERVAL_SECONDS:
                     if self.recv_buffer_used > 0:
-                        processed = max(1, self.recv_buffer_used // 2)
+                        processed = min(RWND_INCREASE_STEP, self.recv_buffer_used)
                         self.recv_buffer_used -= processed
                         if self.recv_buffer_used < 0:
                             self.recv_buffer_used = 0
@@ -407,9 +597,10 @@ class GameLogic:
                         self.logger.warning(
                             f"Receive window {WINDOW_STALL_TIMEOUT_SECONDS} saniye boyunca full kaldı → biz suçluyuz, rakibe puan."
                         )
-                        # Burada bizim hatamız → scoreboard.py'de bu olaya göre puanlama yapıldığına emin ol
-                        self.scoreboard.opponent_timeout()
-                        break
+                        # Bizim hatamız → biz puan kaybederiz (oyun bitmesin)
+                        self.scoreboard.my_penalty(1)
+                        # Yeniden saymaya başla (oyun devam)
+                        self.window_full_since = now
 
                 # Buradan sonrası sadece süre > 0 iken çalışır
                 self.logger.info(
@@ -418,7 +609,11 @@ class GameLogic:
 
                 if my_turn_to_send:
                     try:
-                        pkt = self._create_next_data_packet()
+                        # Retransmission varsa kullanıcı girişi yerine onu gönder
+                        if getattr(self, "_retransmit_queue", None):
+                            pkt = self._create_next_retransmit_packet()
+                        else:
+                            pkt = self._create_next_data_packet()
                     except RuntimeError:
                         # Pencere dolu -> sadece ACK gönder
                         ack = self.validator.peer.last_seq + self.validator.peer.last_len
@@ -436,7 +631,15 @@ class GameLogic:
                         pkt = self._receive_packet()
                     except TimeoutError:
                         self.logger.warning("Peer timeout → skor güncellenecek.")
-                        self.scoreboard.opponent_timeout()
+                        # Özel kural: rwnd=0 advertise eden taraf, 45 sn hiç paket yoksa puan kaybeder.
+                        if (
+                            self.zero_window_since is not None
+                            and time.time() - self.zero_window_since >= WINDOW_STALL_TIMEOUT_SECONDS
+                        ):
+                            self.scoreboard.my_penalty(1)
+                            self.zero_window_since = time.time()
+                        else:
+                            self.scoreboard.opponent_penalty(1)
                         my_turn_to_send = True
                         continue
                     except ConnectionError as e:
@@ -445,8 +648,11 @@ class GameLogic:
                         )
                         break
 
-                    self._respond_to_incoming(pkt)
-                    my_turn_to_send = True
+                    response_sent = self._respond_to_incoming(pkt)
+                    # Turn-based:
+                    # - ACK alındı ve cevap göndermediysek -> sıra bizde
+                    # - Herhangi bir cevap gönderdiysek -> sıra peer'de
+                    my_turn_to_send = (pkt.type == "ACK") and (not response_sent)
                     time.sleep(0.2)  # 200ms bekle, terminali rahatlatır
 
                 # Eğer biz rwnd=0 durumunda kaldıysak ve WINDOW_STALL_TIMEOUT_SECONDS hiçbir aktivite yoksa
@@ -458,9 +664,10 @@ class GameLogic:
                         self.logger.warning(
                             f"{WINDOW_STALL_TIMEOUT_SECONDS} saniye boyunca rwnd=0 kaldık ve hiç paket alışverişi olmadı → biz puan kaybediyoruz."
                         )
-                        # Burada da bizim hatamız; scoreboard.py'de buna göre puan verildiğinden emin ol
-                        self.scoreboard.opponent_timeout()
-                        break
+                        # rwnd=0 advertise eden taraf biziz → biz puan kaybederiz (oyun bitmesin)
+                        self.scoreboard.my_penalty(1)
+                        # Yeniden saymaya başla
+                        self.zero_window_since = now
 
         except (TimeoutError, ConnectionError) as e:
             self.logger.warning(f"Game ended due to connection problem: {e}")

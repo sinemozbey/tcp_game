@@ -8,21 +8,30 @@ class Scoreboard:
     my_score: int = 0
     opponent_score: int = 0
 
-    def detected_error(self):
-        self.my_score += 1
+    def my_reward(self, points: int = 1) -> None:
+        self.my_score += points
 
-    def my_invalid_undetected(self):
-        self.my_score += 1
+    def opponent_reward(self, points: int = 1) -> None:
+        self.opponent_score += points
 
-    def opponent_timeout(self):
-        # Opponent fails to respond within 30s → they lose 1 point (we record it as +1 to us or -1 to them?)
-        # Spec says: "the side who must send a response will lose 1 point."
-        # Here we treat it as: my_score += 1 (easier to reason in one place)
-        self.my_score += 1
+    def my_penalty(self, points: int = 1) -> None:
+        self.my_score -= points
 
-    def my_timeout(self):
-        # Our local timeout – we lose 1 point
-        self.my_score -= 1
+    def opponent_penalty(self, points: int = 1) -> None:
+        self.opponent_score -= points
+
+    # Backward compatible aliases (old names used in older code paths)
+    def detected_error(self) -> None:
+        self.my_reward(1)
+
+    def my_invalid_undetected(self) -> None:
+        self.my_reward(1)
+
+    def opponent_timeout(self) -> None:
+        self.opponent_penalty(1)
+
+    def my_timeout(self) -> None:
+        self.my_penalty(1)
 
     def snapshot(self) -> str:
         return f"Score: ME={self.my_score}, OPP={self.opponent_score}"

@@ -33,22 +33,22 @@ class Connection:
     # ------------------------------------------------------------------ #
 
     @classmethod
-    def create_as_server(cls) -> "Connection":
+    def create_as_server(cls, host: str = HOST, port: int = PORT) -> "Connection":
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((HOST, PORT))
+        s.bind((host, port))
         s.listen(1)
-        logger.info(f"Listening on {HOST}:{PORT}")
+        logger.info(f"Listening on {host}:{port}")
         conn, addr = s.accept()
         logger.info(f"Accepted connection from {addr}")
         s.close()
         return cls(conn)
 
     @classmethod
-    def create_as_client(cls) -> "Connection":
+    def create_as_client(cls, host: str = HOST, port: int = PORT) -> "Connection":
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        logger.info(f"Connecting to {HOST}:{PORT} ...")
-        s.connect((HOST, PORT))
+        logger.info(f"Connecting to {host}:{port} ...")
+        s.connect((host, port))
         logger.info("Connected.")
         return cls(s)
 
