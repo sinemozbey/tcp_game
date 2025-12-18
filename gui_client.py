@@ -527,16 +527,22 @@ class GameLogicGUI(GameLogic):
         return self._create_response_packet_from_input(user_input)
 
     def _send_packet(self, pkt: Packet):
-        # Eğer özel senkronizasyon paketi ise log ve animasyon yapma (gizli tut)
-        if pkt.type == "ERROR" and "SYNC_FALSE_ALARM" in (pkt.comment or ""):
-            super()._send_packet(pkt)
-            return
+        # SYNC paketi kontrolü
+        is_sync_packet = (pkt.type == "ERROR" and "SYNC_FALSE_ALARM" in (pkt.comment or ""))
 
+        # YENİ DÜZELTME: SYNC paketi olsa bile animasyonu göster (Kullanıcı oku görsün)
         self.ui.append_log(f"Sent: {pkt.type} s={pkt.seq} a={pkt.ack}")
         self.ui.animate_send(pkt)
+        
+        # Soketten gönder
         super()._send_packet(pkt)
+        
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
-        self.ui.set_mode("WAITING")
+        
+        # EĞER SYNC PAKETİ İSE: Arayüzü WAITING yapma! Sıra bizde kalmalı.
+        # EĞER NORMAL PAKET İSE: Arayüzü WAITING yap.
+        if not is_sync_packet:
+            self.ui.set_mode("WAITING")
 
     def _receive_packet(self) -> Packet:
         start_wait = time.time()
@@ -567,7 +573,11 @@ class GameLogicGUI(GameLogic):
             self.scoreboard.opponent_score -= 1
             self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
             self.ui.append_log("⚠️ Opponent penalized (False Alarm Sync).")
-            # Bu paketi 'sessizce' döndür, arayüzü tetikleme
+            
+            # YENİ DÜZELTME: Karşı taraf da bu 'hayali' hatayı görsel olarak timeline'da görsün
+            self.ui.animate_recv(pkt)
+            
+            # Bu paketi 'sessizce' döndür, arayüzü tetikleme (kullanıcıya hamle sorma)
             return pkt
         # ------------------------------------------------
 
