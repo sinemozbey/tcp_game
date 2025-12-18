@@ -571,7 +571,9 @@ class GameLogicGUI(GameLogic):
                 self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
                 self.ui.append_log("⚠️ Opponent penalized (False Alarm Sync).")
                 self.ui.animate_recv(pkt) # Varsayılan ERROR oku
-                # Bu paketi yuttuk, sıradaki paketi beklemeye devam et
+                
+                # [DÜZELTME]: Timer'ı sıfırla, çünkü beklemeye devam ediyoruz
+                start_wait = time.time()
                 continue 
 
             # --- 2. SYNC: TIMEOUT PENALTY ---
@@ -581,7 +583,9 @@ class GameLogicGUI(GameLogic):
                 self.ui.append_log("⏳ Opponent Inactivity Timeout (-1 Point)")
                 # Timeout'u "TIMEOUT" türünde (gri ok) göster
                 self.ui.animate_recv(pkt, kind_override="TIMEOUT")
-                # Bu paketi yuttuk, sıradaki paketi beklemeye devam et
+                
+                # [DÜZELTME]: Timer'ı sıfırla! Yoksa hemen timeout'a düşeriz.
+                start_wait = time.time()
                 continue
 
             # --- NORMAL PAKET (İşlenmek üzere döndür) ---
