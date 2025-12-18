@@ -341,17 +341,10 @@ class SingleClientGUI(tk.Frame):
         except ValueError:
             messagebox.showerror("Input Error", "All fields must be integers!")
             return
-        if seq < 0 or ack < 0 or length < 0:
-            messagebox.showerror(
-                "Input Error",
-                "Seq, Ack and Length cannot be negative!"
-            )
-            return
-        # rwnd NEGATİF OLABİLİR (illegal test için)
 
-        #if seq < 0 or ack < 0 or rwnd < 0 or length < 0:
-         #   messagebox.showerror("Input Error", "Values cannot be negative!")
-         #   return
+        if seq < 0 or ack < 0 or rwnd < 0 or length < 0:
+            messagebox.showerror("Input Error", "Values cannot be negative!")
+            return
 
         input_data = {
             "action": "SEND",
