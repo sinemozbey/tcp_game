@@ -4,14 +4,12 @@ import threading
 import queue
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, font
 
 from core.game_logic import GameLogic
 from core.packet import Packet
 from core.connection import TimeoutError
 from utils.config import (
-    MIN_SEGMENT_SIZE,
-    MAX_SEGMENT_SIZE,
     ROLE_A_NAME,
     ROLE_B_NAME,
     MAX_RWND,
@@ -20,40 +18,56 @@ from utils.config import (
 )
 
 # ===================================================================== #
-#  TOP SECTION: TIMELINE PANEL (VERTICAL PACKET FLOW)
+#  MODERN STİL AYARLARI
+# ===================================================================== #
+COLOR_BG_MAIN = "#F0F2F5"       # Ana arka plan (Açık Gri)
+COLOR_CARD_BG = "#FFFFFF"       # Kart arka planı (Beyaz)
+COLOR_PRIMARY = "#2980B9"       # Ana renk (Mavi)
+COLOR_SUCCESS = "#27AE60"       # Başarı (Yeşil)
+COLOR_DANGER  = "#C0392B"       # Hata (Kırmızı)
+COLOR_TEXT_MAIN = "#2C3E50"     # Ana metin rengi
+FONT_MAIN = ("Segoe UI", 10)
+FONT_BOLD = ("Segoe UI", 10, "bold")
+FONT_HEADER = ("Segoe UI", 14, "bold")
+FONT_MONO = ("Consolas", 9)
+
+# ===================================================================== #
+#  TIMELINE PANEL (ANIMASYONLU OKLAR)
 # ===================================================================== #
 
-class TimelineCanvas(ttk.Frame):
-    def __init__(self, master: tk.Misc, local_name: str, peer_name: str, **kwargs):
-        super().__init__(master, **kwargs)
+class TimelineCanvas(tk.Frame):
+    def __init__(self, master, local_name: str, peer_name: str, **kwargs):
+        # Frame arka planını beyaz yapalım
+        super().__init__(master, bg=COLOR_CARD_BG, **kwargs)
 
         self.local_name = local_name
         self.peer_name = peer_name
 
-        # --- Scrollbar ve Canvas Kurulumu ---
-        self.scrollbar = tk.Scrollbar(self, orient="vertical")
+        # --- Scrollbar ve Canvas ---
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical")
         self.scrollbar.pack(side="right", fill="y")
 
         self.canvas = tk.Canvas(
             self, 
-            height=250, 
-            bg="white", 
-            bd=2, 
-            relief="ridge",
+            height=300, 
+            bg=COLOR_CARD_BG, 
+            bd=0, 
+            highlightthickness=0, # Çerçeve çizgisini kaldır
             yscrollcommand=self.scrollbar.set
         )
-        self.canvas.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
         self.scrollbar.config(command=self.canvas.yview)
 
         # Çizim Parametreleri
-        self.current_y = 40      # İlk okun başlayacağı Y koordinatı
-        self.y_step = 40         # Her paket arasındaki dikey boşluk
-        self.margin_x = 60       # Kenar boşlukları
-        self.arrow_slant = 15    # Okun aşağı doğru eğimi
+        self.current_y = 50      
+        self.y_step = 45         
+        self.margin_x = 80       
+        self.arrow_slant = 20    
 
         self.canvas.bind("<Configure>", self._on_resize)
         self.width = 1
-
+        
+        # Başlıkları ilk kez çiz
         self._draw_headers()
 
     def _on_resize(self, event):
@@ -65,27 +79,38 @@ class TimelineCanvas(ttk.Frame):
         self.canvas.delete("header")
         
         x_left = self.margin_x
-        # Eğer width henüz hesaplanmadıysa varsayılan bir değer kullan
         w = self.width if self.width > 100 else 400
         x_right = w - self.margin_x
 
-        # İsimler
-        self.canvas.create_text(x_left, 15, text=f"{self.local_name} (Me)", font=("Helvetica", 9, "bold"), tags="header", anchor="center")
-        self.canvas.create_text(x_right, 15, text=self.peer_name, font=("Helvetica", 9, "bold"), tags="header", anchor="center")
+        # İsimler (Daha modern kutular içinde)
+        self._draw_badge(x_left, 20, f"{self.local_name} (Me)", "#ECF0F1", COLOR_TEXT_MAIN)
+        self._draw_badge(x_right, 20, self.peer_name, "#ECF0F1", COLOR_TEXT_MAIN)
+
+        # Dikey referans çizgileri (Timeline)
+        line_height = max(self.current_y + 100, self.canvas.winfo_height())
+        self.canvas.create_line(x_left, 45, x_left, line_height, fill="#BDC3C7", dash=(2, 2), width=1, tags="header")
+        self.canvas.create_line(x_right, 45, x_right, line_height, fill="#BDC3C7", dash=(2, 2), width=1, tags="header")
+
+    def _draw_badge(self, x, y, text, bg_color, text_color):
+        """İsimleri şık bir kutu içinde yazar."""
+        font_badge = ("Segoe UI", 9, "bold")
+        # Metin genişliğini ölçmek için geçici bir text oluşturup silebiliriz veya tahmini genişlik verebiliriz.
+        # Basitlik için text'i oluşturup bbox alalım.
+        t_id = self.canvas.create_text(x, y, text=text, font=font_badge, fill=text_color, tags="header")
+        bbox = self.canvas.bbox(t_id)
+        # Arka plan kutusu (Text'in altına çizmek için 'lower' yapmamız lazım ama silip baştan çizmek daha kolay)
+        self.canvas.delete(t_id)
         
-        # Dikey referans çizgileri
-        # ÖNEMLİ DÜZELTME: Çizgiler artık sonsuza (50000) değil, mevcut içeriğin bittiği yere kadar gidiyor.
-        # En az canvas boyu kadar olsun ki boşken çirkin durmasın.
-        line_height = max(self.current_y + 50, self.canvas.winfo_height())
-        
-        self.canvas.create_line(x_left, 25, x_left, line_height, fill="#dddddd", dash=(4, 4), tags="header")
-        self.canvas.create_line(x_right, 25, x_right, line_height, fill="#dddddd", dash=(4, 4), tags="header")
+        pad = 8
+        rect_id = self.canvas.create_rectangle(
+            bbox[0]-pad, bbox[1]-pad, bbox[2]+pad, bbox[3]+pad, 
+            fill=bg_color, outline="", tags="header"
+        )
+        # Köşeleri yuvarlatılmış hissi vermek için (Tkinter rectangle tam desteklemez ama bu hali temiz durur)
+        self.canvas.create_text(x, y, text=text, font=font_badge, fill=text_color, tags="header")
 
     def add_packet_arrow(self, direction, kind, seq, ack, rwnd, length):
-        """
-        Timeline'a yeni bir paket oku ekler.
-        direction: 'outgoing' veya 'incoming'
-        """
+        """Animasyonlu ok ekler."""
         x_left = self.margin_x
         w = self.canvas.winfo_width()
         x_right = (w if w > 100 else 400) - self.margin_x
@@ -93,70 +118,87 @@ class TimelineCanvas(ttk.Frame):
         y_start = self.current_y
         y_end = self.current_y + self.arrow_slant
 
-        # --- RENK MANTIĞI ---
-        # 1. Ok Rengi (GÖNDEREN KİM? A mı B mi?)
-        # Önce gönderenin kim olduğunu bulalım
-        if direction == "outgoing":
-            sender_name = self.local_name
-        else:
-            sender_name = self.peer_name
-            
-        if sender_name == ROLE_A_NAME:
-            arrow_color = "#3498db" # Client A = Mavi
-        else:
-            arrow_color = "#e67e22" # Client B = Turuncu
+        # --- Renk ve Stil ---
+        sender_name = self.local_name if direction == "outgoing" else self.peer_name
         
-        # 2. Metin Rengi (Paket Tipi Nedir?)
-        text_color = "black"
+        if sender_name == ROLE_A_NAME:
+            arrow_color = "#3498DB" # Mavi (Client A)
+        else:
+            arrow_color = "#E67E22" # Turuncu (Client B)
+        
+        text_color = "#34495E"
         line_width = 2
         
         if kind == "ACK": 
-            text_color = "#27ae60"   # Yeşil yazı
+            text_color = "#27AE60"
         elif kind == "ERROR": 
-            text_color = "#c0392b"   # Kırmızı yazı
-            line_width = 3           # Hata okları daha kalın
-            arrow_color = "#c0392b"  # Hata okları komple kırmızı olsun
+            text_color = "#C0392B"
+            line_width = 3
+            arrow_color = "#C0392B"
         elif kind == "RETX":
-            text_color = "#d35400"   # Koyu Turuncu
+            text_color = "#D35400"
 
-        # Etiket Metni
+        # Etiket
         label = f"{kind}"
-        if seq is not None: label += f" s={seq}"
-        if ack is not None: label += f" a={ack}"
-        if rwnd is not None: label += f" w={rwnd}"
-        if length is not None: label += f" len={length}"
+        details = []
+        if seq is not None: details.append(f"s={seq}")
+        if ack is not None: details.append(f"a={ack}")
+        if rwnd is not None: details.append(f"w={rwnd}")
+        if length is not None: details.append(f"len={length}")
+        label_full = f"{label} {' '.join(details)}"
 
+        # Koordinatlar
         if direction == "outgoing":
-            # Bizden -> Karşıya (Soldan Sağa)
-            self.canvas.create_line(x_left, y_start, x_right, y_end, arrow=tk.LAST, fill=arrow_color, width=line_width, tags="arrow")
-            self.canvas.create_text((x_left + x_right) / 2, y_start - 8, text=label, fill=text_color, font=("Helvetica", 8, "bold"), tags="arrow")
+            x1, y1 = x_left, y_start
+            x2, y2 = x_right, y_end
         else:
-            # Karşıdan -> Bize (Sağdan Sola)
-            self.canvas.create_line(x_right, y_start, x_left, y_end, arrow=tk.LAST, fill=arrow_color, width=line_width, tags="arrow")
-            self.canvas.create_text((x_left + x_right) / 2, y_start - 8, text=label, fill=text_color, font=("Helvetica", 8, "bold"), tags="arrow")
+            x1, y1 = x_right, y_start
+            x2, y2 = x_left, y_end
 
-        # Sonraki pozisyonu güncelle
+        # --- ANIMASYON BAŞLAT ---
+        # Önce boş bir çizgi ve metin oluştur (gizli)
+        arrow_id = self.canvas.create_line(x1, y1, x1, y1, fill=arrow_color, width=line_width, arrow=tk.LAST, tags="arrow")
+        text_id = self.canvas.create_text((x1+x2)/2, y1-10, text=label_full, fill=text_color, font=("Segoe UI", 8, "bold"), tags="arrow", state="hidden")
+        
+        # Animasyon adımları
+        steps = 20
+        duration_ms = 400 # Toplam süre
+        step_delay = duration_ms // steps
+        
+        self.animate_arrow_step(arrow_id, text_id, x1, y1, x2, y2, 0, steps, step_delay)
+
+        # Sonraki pozisyonu ayarla
         self.current_y += self.y_step
+        self._draw_headers() # Çizgileri uzat
         
-        # Dikey çizgileri uzatmak için header'ı güncelle (ama her seferinde hepsini silip çizmek yerine sadece update edebiliriz,
-        # fakat basitlik için _draw_headers çağırabiliriz veya sadece arka plan çizgilerini uzatabiliriz.)
-        # Performans için sadece çizgileri güncelleyelim:
-        self._draw_headers()
-
-        # Scroll alanını güncelle ve EN ALTA kaydır
+        # Scroll alanını genişlet ama hemen aşağı atlama, animasyon bitince odaklanabiliriz
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        # Yine de kullanıcı yeni paketi görsün diye kaydırıyoruz
+        if self.current_y > self.canvas.winfo_height():
+            self.canvas.yview_moveto(1.0)
+
+    def animate_arrow_step(self, arrow_id, text_id, x1, y1, x2, y2, step, max_steps, delay):
+        if step > max_steps:
+            # Bittiğinde metni göster
+            self.canvas.itemconfig(text_id, state="normal")
+            return
         
-        # Bazen bbox hemen güncellenmez, update_idletasks gerekebilir ama genellikle after döngüsünde olduğumuz için çalışır.
-        self.canvas.yview_moveto(1.0)
+        # Interpolasyon (Lerp)
+        t = step / max_steps
+        cur_x = x1 + (x2 - x1) * t
+        cur_y = y1 + (y2 - y1) * t
+        
+        self.canvas.coords(arrow_id, x1, y1, cur_x, cur_y)
+        self.after(delay, lambda: self.animate_arrow_step(arrow_id, text_id, x1, y1, x2, y2, step+1, max_steps, delay))
 
 
 # ===================================================================== #
-#  SINGLE CLIENT WINDOW (MANUAL INPUT ONLY)
+#  SINGLE CLIENT GUI (MODERNIZED)
 # ===================================================================== #
 
-class SingleClientGUI(ttk.Frame):
+class SingleClientGUI(tk.Frame):
     def __init__(self, root: tk.Tk, role: str):
-        super().__init__(root, padding=10)
+        super().__init__(root)
         self.root = root
         self.role = role
         self.peer_name = ROLE_B_NAME if role == ROLE_A_NAME else ROLE_A_NAME
@@ -165,127 +207,169 @@ class SingleClientGUI(ttk.Frame):
         self.incoming_packet = None
         self.current_mode = "SENDING"
         
+        # Stil Ayarları
+        self._configure_styles()
+        self.configure(bg=COLOR_BG_MAIN)
+        
         self._build_ui()
 
+    def _configure_styles(self):
+        style = ttk.Style()
+        style.theme_use('clam') # 'clam' teması daha esnek renk değişimi sağlar
+        
+        # Genel Frame
+        style.configure("TFrame", background=COLOR_BG_MAIN)
+        style.configure("Card.TFrame", background=COLOR_CARD_BG, relief="flat")
+        
+        # LabelFrame
+        style.configure("Card.TLabelframe", background=COLOR_CARD_BG, relief="flat")
+        style.configure("Card.TLabelframe.Label", background=COLOR_CARD_BG, foreground=COLOR_PRIMARY, font=FONT_BOLD)
+
+        # Label
+        style.configure("TLabel", background=COLOR_BG_MAIN, foreground=COLOR_TEXT_MAIN, font=FONT_MAIN)
+        style.configure("Card.TLabel", background=COLOR_CARD_BG, foreground=COLOR_TEXT_MAIN, font=FONT_MAIN)
+        style.configure("Header.TLabel", font=FONT_HEADER, background=COLOR_BG_MAIN, foreground=COLOR_TEXT_MAIN)
+        
+        # Entry
+        style.configure("TEntry", fieldbackground="white", padding=5)
+
+        # Buttons
+        style.configure("Send.TButton", background=COLOR_SUCCESS, foreground="white", font=FONT_BOLD, borderwidth=0)
+        style.map("Send.TButton", background=[("active", "#219150")])
+        
+        style.configure("Error.TButton", background=COLOR_DANGER, foreground="white", font=FONT_BOLD, borderwidth=0)
+        style.map("Error.TButton", background=[("active", "#A93226")])
+
     def _build_ui(self):
-        self.root.title(f"TCP Game — {self.role} (MANUAL MODE)")
-        self.root.geometry("950x900") 
+        self.root.title(f"TCP Game — {self.role}")
+        self.root.geometry("1000x950")
+        self.root.configure(bg=COLOR_BG_MAIN)
 
-        header = ttk.Label(self, text=f"TCP Game — {self.role}", font=("Helvetica", 16, "bold"))
-        header.pack(pady=(0, 4))
-        
-        # --- SCOREBOARD ---
-        score_frame = ttk.Frame(self, padding=5)
-        score_frame.pack(fill="x", pady=(0, 8))
-        
-        # Sol taraf - Kendi skorumuz
-        left_score = ttk.Frame(score_frame, relief="solid", borderwidth=2, padding=10)
-        left_score.pack(side="left", fill="both", expand=True, padx=(0, 5))
-        
-        ttk.Label(left_score, text=f"{self.role}", font=("Helvetica", 11, "bold"), foreground="#2E86C1").pack()
-        self.my_score_label = ttk.Label(left_score, text="0", font=("Helvetica", 28, "bold"), foreground="#27AE60")
+        # --- ANA KONTEYNER (Padding ile) ---
+        main_container = ttk.Frame(self, padding=20)
+        main_container.pack(fill="both", expand=True)
+
+        # --- HEADER ---
+        header_frame = ttk.Frame(main_container)
+        header_frame.pack(fill="x", pady=(0, 15))
+        ttk.Label(header_frame, text=f"TCP Network Game Simulator", font=("Segoe UI", 18, "bold"), foreground=COLOR_PRIMARY).pack(side="left")
+        ttk.Label(header_frame, text=f"Role: {self.role}", font=("Segoe UI", 12), foreground="gray").pack(side="right", anchor="s")
+
+        # --- SCOREBOARD CARD ---
+        score_card = self._create_card(main_container)
+        score_card.pack(fill="x", pady=(0, 15))
+
+        # Grid Layout for Scores
+        score_card.columnconfigure(0, weight=1)
+        score_card.columnconfigure(1, weight=0) # VS
+        score_card.columnconfigure(2, weight=1)
+
+        # Sol Skor (Biz)
+        f_left = ttk.Frame(score_card, style="Card.TFrame")
+        f_left.grid(row=0, column=0, pady=10)
+        ttk.Label(f_left, text="ME", style="Card.TLabel", font=("Segoe UI", 10, "bold"), foreground=COLOR_PRIMARY).pack()
+        self.my_score_label = ttk.Label(f_left, text="0", style="Card.TLabel", font=("Segoe UI", 32, "bold"), foreground=COLOR_SUCCESS)
         self.my_score_label.pack()
-        ttk.Label(left_score, text="points", font=("Helvetica", 9), foreground="gray").pack()
-        
-        # Orta - VS
-        ttk.Label(score_frame, text="VS", font=("Helvetica", 12, "bold"), foreground="#E74C3C").pack(side="left", padx=10)
-        
-        # Sağ taraf - Rakip skoru
-        right_score = ttk.Frame(score_frame, relief="solid", borderwidth=2, padding=10)
-        right_score.pack(side="left", fill="both", expand=True, padx=(5, 0))
-        
-        ttk.Label(right_score, text=f"{self.peer_name}", font=("Helvetica", 11, "bold"), foreground="#E67E22").pack()
-        self.opponent_score_label = ttk.Label(right_score, text="0", font=("Helvetica", 28, "bold"), foreground="#E74C3C")
+
+        # VS
+        ttk.Label(score_card, text="VS", style="Card.TLabel", font=("Segoe UI", 14, "bold"), foreground="#95A5A6").grid(row=0, column=1, padx=20)
+
+        # Sağ Skor (Rakip)
+        f_right = ttk.Frame(score_card, style="Card.TFrame")
+        f_right.grid(row=0, column=2, pady=10)
+        ttk.Label(f_right, text="OPPONENT", style="Card.TLabel", font=("Segoe UI", 10, "bold"), foreground=COLOR_DANGER).pack()
+        self.opponent_score_label = ttk.Label(f_right, text="0", style="Card.TLabel", font=("Segoe UI", 32, "bold"), foreground=COLOR_DANGER)
         self.opponent_score_label.pack()
-        ttk.Label(right_score, text="points", font=("Helvetica", 9), foreground="gray").pack()
-        
-        # --- RWND DURUM PANELİ ---
-        status_frame = ttk.Frame(self, relief="groove", borderwidth=2, padding=5)
-        status_frame.pack(fill="x", pady=(0, 8))
-        
-        self.rwnd_label = ttk.Label(
-            status_frame, 
-            text="My Receiver Window (rwnd): 50", 
-            font=("Courier", 12, "bold"), 
-            foreground="#8E44AD"
-        )
-        self.rwnd_label.pack()
-        # -------------------------
-        
-        # --- TIMELINE (YENİ) ---
-        timeline_frame = ttk.LabelFrame(self, text="📊 Packet Timeline (A=Blue, B=Orange)", padding=5)
-        timeline_frame.pack(fill="x", pady=(0, 8), expand=False)
-        
-        self.timeline = TimelineCanvas(timeline_frame, local_name=self.role, peer_name=self.peer_name, height=250)
-        self.timeline.pack(fill="both", expand=True)
 
-        # GELEN PAKET
-        incoming_frame = ttk.LabelFrame(self, text="📥 Incoming Packet", padding=10)
-        incoming_frame.pack(fill="x", pady=(4, 8))
+        # RWND Bilgisi (Scoreboard içinde alt kısım)
+        self.rwnd_label = ttk.Label(score_card, text="My Rwnd: 50", style="Card.TLabel", font=("Consolas", 12, "bold"), foreground="#8E44AD")
+        self.rwnd_label.grid(row=1, column=0, columnspan=3, pady=(0, 10))
+
+        # --- ORTA BÖLÜM: TIMELINE & KONTROLLER ---
+        middle_pane = ttk.PanedWindow(main_container, orient="horizontal")
+        middle_pane.pack(fill="both", expand=True, pady=(0, 15))
+
+        # SOL: Timeline
+        timeline_frame = self._create_card_frame(middle_pane, "Live Packet Timeline")
+        middle_pane.add(timeline_frame, weight=3)
         
-        self.incoming_label = ttk.Label(
-            incoming_frame, 
-            text="Waiting for packet...", 
-            font=("Courier", 11), 
-            foreground="blue"
-        )
-        self.incoming_label.pack()
+        self.timeline = TimelineCanvas(timeline_frame, local_name=self.role, peer_name=self.peer_name)
+        self.timeline.pack(fill="both", expand=True, padx=5, pady=5)
 
-        # MANUEL GİRİŞ
-        control_frame = ttk.LabelFrame(self, text="📤 Your Response", padding=10)
-        control_frame.pack(fill="x", pady=(4, 8))
+        # SAĞ: Kontroller ve Loglar
+        right_panel = ttk.Frame(middle_pane) # Konteyner
+        middle_pane.add(right_panel, weight=2)
         
-        self.mode_label = ttk.Label(
-            control_frame,
-            text="",
-            font=("Helvetica", 10, "bold"),
-            foreground="green"
-        )
-        self.mode_label.grid(row=0, column=0, columnspan=3, pady=(0, 10))
-
-        ttk.Label(control_frame, text="Sequence Number (seq):").grid(row=1, column=0, sticky="e", padx=5, pady=5)
-        self.seq_var = tk.StringVar()
-        ttk.Entry(control_frame, textvariable=self.seq_var, width=12).grid(row=1, column=1, sticky="w")
-
-        ttk.Label(control_frame, text="Acknowledgment (ack):").grid(row=2, column=0, sticky="e", padx=5, pady=5)
-        self.ack_var = tk.StringVar()
-        ttk.Entry(control_frame, textvariable=self.ack_var, width=12).grid(row=2, column=1, sticky="w")
-
-        ttk.Label(control_frame, text="Window Size (rwnd):").grid(row=3, column=0, sticky="e", padx=5, pady=5)
-        self.rwnd_var = tk.StringVar()
-        ttk.Entry(control_frame, textvariable=self.rwnd_var, width=12).grid(row=3, column=1, sticky="w")
-
-        ttk.Label(control_frame, text="Data Length (0-5):").grid(row=4, column=0, sticky="e", padx=5, pady=5)
-        self.length_var = tk.StringVar()
-        ttk.Entry(control_frame, textvariable=self.length_var, width=12).grid(row=4, column=1, sticky="w")
-
-        btn_frame = ttk.Frame(control_frame)
-        btn_frame.grid(row=1, column=2, rowspan=4, padx=30)
+        # -- Gelen Paket Bilgisi --
+        incoming_card = self._create_card_frame(right_panel, "Incoming Packet")
+        incoming_card.pack(fill="x", pady=(0, 10), padx=(10, 0))
         
-        self.send_btn = ttk.Button(btn_frame, text="✅ SEND", command=self._on_send_clicked, width=15)
-        self.send_btn.pack(pady=5)
-        
-        self.error_btn = ttk.Button(btn_frame, text="❌ ERROR", command=self._on_error_clicked, width=15)
-        self.error_btn.pack(pady=5)
+        self.incoming_label = ttk.Label(incoming_card, text="Waiting...", style="Card.TLabel", foreground="#7F8C8D", padding=10)
+        self.incoming_label.pack(fill="x")
 
-        self.info_label = ttk.Label(
-            control_frame, 
-            text="",
-            font=("Helvetica", 9, "italic"),
-            foreground="gray"
-        )
-        self.info_label.grid(row=5, column=0, columnspan=3, pady=(10, 0))
-
-        # LOG
-        bottom = ttk.LabelFrame(self, text="📋 Event Logs", padding=8)
-        bottom.pack(fill="both", expand=True)
+        # -- Kontrol Paneli --
+        control_card = self._create_card_frame(right_panel, "Action Panel")
+        control_card.pack(fill="x", pady=(0, 10), padx=(10, 0))
         
-        self.log = tk.Text(bottom, height=8, font=("Courier", 9))
-        self.log.pack(fill="both", expand=True)
+        self.mode_label = ttk.Label(control_card, text="", style="Card.TLabel", font=("Segoe UI", 10, "bold"), foreground=COLOR_SUCCESS)
+        self.mode_label.pack(pady=(0, 10))
+
+        # Form Grid
+        form_frame = ttk.Frame(control_card, style="Card.TFrame")
+        form_frame.pack(fill="x", padx=10)
+        
+        self._add_form_row(form_frame, 0, "Seq:", self._create_var("seq"))
+        self._add_form_row(form_frame, 1, "Ack:", self._create_var("ack"))
+        self._add_form_row(form_frame, 2, "Rwnd:", self._create_var("rwnd"))
+        self._add_form_row(form_frame, 3, "Len:", self._create_var("length"))
+
+        # Butonlar
+        btn_frame = ttk.Frame(control_card, style="Card.TFrame")
+        btn_frame.pack(fill="x", pady=15, padx=10)
+        
+        self.send_btn = ttk.Button(btn_frame, text="SEND PACKET", style="Send.TButton", command=self._on_send_clicked)
+        self.send_btn.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        self.error_btn = ttk.Button(btn_frame, text="REPORT ERROR", style="Error.TButton", command=self._on_error_clicked)
+        self.error_btn.pack(side="right", fill="x", expand=True, padx=(5, 0))
+        
+        self.info_label = ttk.Label(control_card, text="", style="Card.TLabel", font=("Segoe UI", 8, "italic"), foreground="gray")
+        self.info_label.pack(pady=(0, 10))
+
+        # -- Loglar --
+        log_card = self._create_card_frame(right_panel, "System Logs")
+        log_card.pack(fill="both", expand=True, padx=(10, 0))
+        
+        self.log = scrolledtext.ScrolledText(log_card, height=10, font=FONT_MONO, bg="#FAFAFA", relief="flat")
+        self.log.pack(fill="both", expand=True, padx=5, pady=5)
         self.log.configure(state="disabled")
-        
+
         self.pack(fill="both", expand=True)
 
+    # --- YARDIMCI METODLAR ---
+    def _create_card(self, parent):
+        """Beyaz arka planlı, gölge görünümlü (basit border) çerçeve."""
+        f = ttk.Frame(parent, style="Card.TFrame", padding=10)
+        # Tkinter'da gerçek gölge zordur, border ile simüle ediyoruz
+        f.configure(borderwidth=1, relief="solid") 
+        return f
+
+    def _create_card_frame(self, parent, title):
+        """Başlıklı beyaz çerçeve."""
+        f = ttk.LabelFrame(parent, text=title, style="Card.TLabelframe", padding=10)
+        return f
+
+    def _create_var(self, name):
+        if not hasattr(self, f"{name}_var"):
+            setattr(self, f"{name}_var", tk.StringVar())
+        return getattr(self, f"{name}_var")
+
+    def _add_form_row(self, parent, row, label_text, var):
+        ttk.Label(parent, text=label_text, style="Card.TLabel", width=6, anchor="e").grid(row=row, column=0, padx=5, pady=5)
+        ttk.Entry(parent, textvariable=var, font=("Consolas", 10)).grid(row=row, column=1, sticky="ew", padx=5, pady=5)
+        parent.columnconfigure(1, weight=1)
+
+    # --- Orijinal Fonksiyonlar (Aynen Korundu) ---
     def _on_send_clicked(self):
         try:
             seq = int(self.seq_var.get().strip())
@@ -307,20 +391,13 @@ class SingleClientGUI(ttk.Frame):
             "rwnd": rwnd,
             "length": length
         }
-        
         self._input_queue.put(input_data)
-        self.append_log(f"[USER] SEND → seq={seq}, ack={ack}, rwnd={rwnd}, len={length}")
+        self.append_log(f"📤 SENDING: seq={seq}, ack={ack}, rwnd={rwnd}, len={length}")
 
     def _on_error_clicked(self):
-        input_data = {
-            "action": "ERROR",
-            "seq": 0,
-            "ack": 0,
-            "rwnd": 0,
-            "length": 0
-        }
+        input_data = {"action": "ERROR", "seq": 0, "ack": 0, "rwnd": 0, "length": 0}
         self._input_queue.put(input_data)
-        self.append_log("[USER] ERROR button pressed")
+        self.append_log("⚠️ USER TRIGGERED ERROR REPORT")
 
     def get_input_blocking(self) -> dict:
         return self._input_queue.get()
@@ -330,45 +407,40 @@ class SingleClientGUI(ttk.Frame):
 
     def set_mode(self, mode: str, message: str = ""):
         self.current_mode = mode
-        
         if mode == "SENDING":
-            self.mode_label.config(text="🚀 YOUR TURN: Send a packet", foreground="#27AE60") 
-            self.info_label.config(text="Fill all 4 fields and click SEND")
-            self.error_btn.config(state="disabled")
-            self.send_btn.config(state="normal")
-            
+            self.mode_label.config(text="🚀 YOUR TURN", foreground=COLOR_SUCCESS) 
+            self.info_label.config(text="Prepare packet and click SEND")
+            self.error_btn.state(["disabled"])
+            self.send_btn.state(["!disabled"])
         elif mode == "RESPONDING":
-            msg = message if message else "Packet received!"
-            self.mode_label.config(text=f"🚀 YOUR TURN: {msg}", foreground="#27AE60") 
-            self.info_label.config(text="Click SEND to respond or ERROR to reject")
-            self.error_btn.config(state="normal")
-            self.send_btn.config(state="normal")
-
+            self.mode_label.config(text=f"⚡ ACTION REQUIRED: {message}", foreground=COLOR_PRIMARY) 
+            self.info_label.config(text="Respond (SEND) or Reject (ERROR)")
+            self.error_btn.state(["!disabled"])
+            self.send_btn.state(["!disabled"])
         elif mode == "WAITING":
-            self.mode_label.config(text="⏳ WAITING for peer...", foreground="#E67E22")
-            self.info_label.config(text="Please wait for the opponent's move")
-            self.error_btn.config(state="disabled")
-            self.send_btn.config(state="disabled")
+            self.mode_label.config(text="⏳ WAITING PEER...", foreground="#F39C12")
+            self.info_label.config(text="Waiting for opponent's move")
+            self.error_btn.state(["disabled"])
+            self.send_btn.state(["disabled"])
 
     def show_incoming_packet(self, pkt: Packet):
         def _update_ui():
             if pkt.type == "ERROR":
-                text = "❌ ERROR received from peer"
-                color = "red"
+                text = "❌ ERROR RECEIVED"
+                fg = COLOR_DANGER
             else:
-                text = f"📥 Type={pkt.type} | seq={pkt.seq}, ack={pkt.ack}, rwnd={pkt.rwnd}, len={pkt.length}"
-                color = "darkblue"
+                text = f"📥 {pkt.type} | s={pkt.seq} a={pkt.ack} w={pkt.rwnd} l={pkt.length}"
+                fg = COLOR_PRIMARY
             
-            self.incoming_label.config(text=text, foreground=color)
+            self.incoming_label.config(text=text, foreground=fg)
             self.incoming_packet = pkt
-            self.append_log(f"\n{'='*60}\n{text}\n{'='*60}")
-            self.set_mode("RESPONDING", "Packet received!")
-        
+            self.append_log(f"{text}")
+            self.set_mode("RESPONDING", "Packet Received")
         self.root.after(0, _update_ui)
 
     def append_log(self, text: str):
         self.log.configure(state="normal")
-        self.log.insert("end", text + "\n")
+        self.log.insert("end", f"> {text}\n")
         self.log.see("end")
         self.log.configure(state="disabled")
     
@@ -376,17 +448,6 @@ class SingleClientGUI(ttk.Frame):
         def _update():
             self.my_score_label.config(text=str(my_score))
             self.opponent_score_label.config(text=str(opponent_score))
-            
-            if my_score > opponent_score:
-                self.my_score_label.config(foreground="#27AE60")
-                self.opponent_score_label.config(foreground="#E74C3C")
-            elif opponent_score > my_score:
-                self.my_score_label.config(foreground="#E74C3C")
-                self.opponent_score_label.config(foreground="#27AE60")
-            else:
-                self.my_score_label.config(foreground="#3498DB")
-                self.opponent_score_label.config(foreground="#3498DB")
-        
         self.root.after(0, _update)
     
     def animate_send(self, pkt): 
@@ -400,20 +461,16 @@ class SingleClientGUI(ttk.Frame):
         ))
     
     def start_rwnd_monitor(self, game_logic):
-        current_val = game_logic.current_rwnd
-        
-        self.rwnd_label.config(text=f"My Receiver Window (rwnd): {current_val}")
-        
-        if current_val <= 0:
-            self.rwnd_label.config(foreground="red", text=f"⚠️ RWND CLOSED ({current_val})")
+        val = game_logic.current_rwnd
+        self.rwnd_label.config(text=f"My Rwnd: {val}")
+        if val <= 0:
+            self.rwnd_label.config(foreground=COLOR_DANGER)
         else:
             self.rwnd_label.config(foreground="#8E44AD")
-
         self.root.after(100, self.start_rwnd_monitor, game_logic)
 
-
 # ===================================================================== #
-#  GAME LOGIC + GUI INTEGRATION
+#  GAME LOGIC + GUI INTEGRATION (NO CHANGE REQUIRED HERE)
 # ===================================================================== #
 
 class GameLogicGUI(GameLogic):
@@ -470,7 +527,7 @@ class GameLogicGUI(GameLogic):
         return self._create_response_packet_from_input(user_input)
 
     def _send_packet(self, pkt: Packet):
-        self.ui.append_log(f"[SEND] {pkt.type} | s={pkt.seq}, a={pkt.ack}, w={pkt.rwnd}, len={pkt.length}")
+        self.ui.append_log(f"Sent: {pkt.type} s={pkt.seq} a={pkt.ack}")
         self.ui.animate_send(pkt)
         super()._send_packet(pkt)
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
@@ -513,7 +570,6 @@ class GameLogicGUI(GameLogic):
             self.scoreboard.opponent_score += 1
             self.logger.info("❌ Opponent detected our error (Correct ERROR) → Opponent +1")
         
-        self.ui.append_log(f"[RECV] {pkt.type} | s={pkt.seq}, a={pkt.ack}, w={pkt.rwnd}, len={pkt.length}")
         self.ui.animate_recv(pkt)
         self.ui.show_incoming_packet(pkt)
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
@@ -542,7 +598,6 @@ class GameLogicGUI(GameLogic):
         )
         self.logger.info(f"Validation Check: valid={is_valid}, reason={reason}")
 
-        # 1. GEÇİCİ BUFFER GÜNCELLEMESİ (Tentative)
         tentative_data_len = 0
         if pkt.type == "DATA" and is_valid:
             expected_now = self.validator.peer.expected_seq
@@ -553,7 +608,6 @@ class GameLogicGUI(GameLogic):
                 self.current_rwnd = MAX_RWND - self.recv_buffer_used
                 self.logger.info(f"Tentative Buffer Update: rwnd -> {self.current_rwnd}")
 
-        # 2. FAST RETRANSMIT TESPİTİ
         processed_ack_early = False
         saved_gbn_base = self.gbn.state.base
         saved_gbn_dup = self.gbn.state.duplicate_ack_count
@@ -565,10 +619,9 @@ class GameLogicGUI(GameLogic):
             
             if retx_req:
                 self._pending_retransmit = True
-                self.ui.mode_label.config(text="⚠️ FAST RETRANSMIT TRIGGERED!", foreground="red")
-                self.ui.info_label.config(text=f"Packet Loss Detected! Enter Seq={self.gbn.state.base} manually to resend.")
+                self.ui.mode_label.config(text="⚠️ FAST RETRANSMIT TRIGGERED!", foreground=COLOR_DANGER)
+                self.ui.info_label.config(text=f"Packet Loss! Resend from Base={self.gbn.state.base}")
 
-        # 3. KULLANICI GİRİŞİNİ BEKLE
         user_decision = self._poll_input_queue()
         outgoing_comment_flag = ""
 
@@ -577,7 +630,6 @@ class GameLogicGUI(GameLogic):
                  self.recv_buffer_used -= tentative_data_len
                  if self.recv_buffer_used < 0: self.recv_buffer_used = 0
                  self.current_rwnd = MAX_RWND - self.recv_buffer_used
-                 self.logger.info(f"User rejected valid packet -> Reverted rwnd to {self.current_rwnd}")
              
              if processed_ack_early:
                  self.gbn.state.base = saved_gbn_base
