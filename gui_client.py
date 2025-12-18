@@ -342,9 +342,9 @@ class SingleClientGUI(tk.Frame):
             messagebox.showerror("Input Error", "All fields must be integers!")
             return
 
-        if seq < 0 or ack < 0 or rwnd < 0 or length < 0:
-            messagebox.showerror("Input Error", "Values cannot be negative!")
-            return
+        #if seq < 0 or ack < 0 or rwnd < 0 or length < 0:
+        #   messagebox.showerror("Input Error", "Values cannot be negative!")
+        #    return
 
         input_data = {
             "action": "SEND",

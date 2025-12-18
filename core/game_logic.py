@@ -107,12 +107,12 @@ class GameLogic:
         Gelen paketi işle, skoru güncelle ve karşı tarafa durumu bildir.
         """
         
-        if pkt.type == "DATA" and self.current_rwnd == 0:
-            self.logger.warning("Peer sent DATA while rwnd=0 → AUTOMATIC ERROR")
-            self.scoreboard.detected_error()
-            err = Packet.error(comment="CORRECT: DATA sent while advertised rwnd=0")
-            self._send_packet(err)
-            return False
+       # if pkt.type == "DATA" and self.current_rwnd == 0:
+       #     self.logger.warning("Peer sent DATA while rwnd=0 → AUTOMATIC ERROR")
+       #     self.scoreboard.detected_error()
+       #     err = Packet.error(comment="CORRECT: DATA sent while advertised rwnd=0")
+       #     self._send_packet(err)
+       #     return False
 
         # --- VALIDATOR'A ZAMAN BİLGİSİ GÖNDERİLİYOR ---
         if self.start_time is None:
@@ -155,7 +155,7 @@ class GameLogic:
                 if pkt.seq == self.validator.peer.expected_seq:
                     data_len = pkt.length or 0
                     self.recv_buffer_used += data_len
-                    if self.recv_buffer_used > MAX_RWND: self.recv_buffer_used = MAX_RWND
+                    #if self.recv_buffer_used > MAX_RWND: self.recv_buffer_used = MAX_RWND
                     self.current_rwnd = MAX_RWND - self.recv_buffer_used
                     self.validator.peer.expected_seq = pkt.seq + data_len
             
