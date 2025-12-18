@@ -470,7 +470,7 @@ class SingleClientGUI(tk.Frame):
         self.root.after(100, self.start_rwnd_monitor, game_logic)
 
 # ===================================================================== #
-#  GAME LOGIC + GUI INTEGRATION (NO CHANGE REQUIRED HERE)
+#  GAME LOGIC + GUI INTEGRATION
 # ===================================================================== #
 
 class GameLogicGUI(GameLogic):
@@ -527,6 +527,11 @@ class GameLogicGUI(GameLogic):
         return self._create_response_packet_from_input(user_input)
 
     def _send_packet(self, pkt: Packet):
+        # Eğer özel senkronizasyon paketi ise log ve animasyon yapma (gizli tut)
+        if pkt.type == "ERROR" and "SYNC_FALSE_ALARM" in (pkt.comment or ""):
+            super()._send_packet(pkt)
+            return
+
         self.ui.append_log(f"Sent: {pkt.type} s={pkt.seq} a={pkt.ack}")
         self.ui.animate_send(pkt)
         super()._send_packet(pkt)
@@ -555,11 +560,21 @@ class GameLogicGUI(GameLogic):
                 raise e
         
         pkt = Packet.from_json(raw["packet"])
+        
+        # --- ÖZEL SYNC PAKETİ KONTROLÜ (Gelen Paket) ---
+        incoming_comment = (pkt.comment or "").upper()
+        if "SYNC_FALSE_ALARM" in incoming_comment:
+            self.scoreboard.opponent_score -= 1
+            self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
+            self.ui.append_log("⚠️ Opponent penalized (False Alarm Sync).")
+            # Bu paketi 'sessizce' döndür, arayüzü tetikleme
+            return pkt
+        # ------------------------------------------------
+
         self.logger.info(f"Received: {pkt}")
         self._record_event("Peer", self.role, pkt, pkt.type)
         self.last_activity_time = time.time()
 
-        incoming_comment = (pkt.comment or "").upper()
         if "MISSED_ERROR" in incoming_comment:
             self.scoreboard.my_score += 1
             self.logger.info("🏆 Peer accepted our INVALID packet (Missed Error) → My Score +1")
@@ -581,6 +596,12 @@ class GameLogicGUI(GameLogic):
         return result
     
     def _respond_to_incoming(self, pkt: Packet) -> bool:
+        # --- ÖZEL SYNC PAKETİ KONTROLÜ (İşleme) ---
+        if "SYNC_FALSE_ALARM" in (pkt.comment or ""):
+            # Bu bir senkronizasyon paketiydi, sıra karşıda değil.
+            return False
+        # ------------------------------------------
+
         if pkt.type == "DATA" and self.current_rwnd == 0:
             self.logger.warning("Peer sent DATA while rwnd=0 → AUTOMATIC ERROR")
             self.scoreboard.detected_error()
@@ -626,27 +647,34 @@ class GameLogicGUI(GameLogic):
         outgoing_comment_flag = ""
 
         if user_decision["action"] == "ERROR":
-             if tentative_data_len > 0:
-                 self.recv_buffer_used -= tentative_data_len
-                 if self.recv_buffer_used < 0: self.recv_buffer_used = 0
-                 self.current_rwnd = MAX_RWND - self.recv_buffer_used
-             
-             if processed_ack_early:
-                 self.gbn.state.base = saved_gbn_base
-                 self.gbn.state.duplicate_ack_count = saved_gbn_dup
-                 self.gbn.state.next_seq = saved_gbn_next
-                 self._pending_retransmit = False 
+             # -- Kullanıcı ERROR butonuna bastı --
 
              if not is_valid:
+                # DURUM A: Haklı Tespit (Paket gerçekten hatalıydı)
                 self.scoreboard.detected_error()
                 outgoing_comment_flag = "CORRECT: User detected error"
+                
+                # Haklı olduğu için ERROR paketini gönder ve sırayı karşıya ver.
+                err = Packet.error(comment=outgoing_comment_flag)
+                self._send_packet(err)
+                return False 
+
              else:
+                # DURUM B: Yanlış Alarm (Paket aslında geçerliydi)
                 self.scoreboard.my_score -= 1
-                outgoing_comment_flag = "FALSE: User pressed ERROR but packet was valid"
-             
-             err = Packet.error(comment=outgoing_comment_flag)
-             self._send_packet(err)
-             return False
+                
+                # GUI'ye geri bildirim ver
+                self.ui.append_log("⚠️ False Alarm! Packet was valid. My Score -1")
+                self.ui.mode_label.config(text="⚠️ FALSE ALARM - TRY AGAIN", foreground="red")
+                self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
+
+                # YENİ: Anında karşı tarafa senkronizasyon paketi gönder.
+                # Bu paket sadece puanı düşürür, sıra vermez.
+                sync_pkt = Packet.error(comment="SYNC_FALSE_ALARM")
+                self._send_packet(sync_pkt)
+
+                # Sıra bizde kalmaya devam ediyor.
+                return True
 
         else:
             if not is_valid:
