@@ -8,15 +8,15 @@ from tkinter import ttk, messagebox
 
 from core.game_logic import GameLogic
 from core.packet import Packet
-from core.connection import TimeoutError  # TimeoutError eklendi
+from core.connection import TimeoutError
 from utils.config import (
     MIN_SEGMENT_SIZE,
     MAX_SEGMENT_SIZE,
     ROLE_A_NAME,
     ROLE_B_NAME,
     MAX_RWND,
-    BUFFER_DRAIN_INTERVAL_SECONDS, # Eklendi
-    RESPONSE_TIMEOUT_SECONDS,      # Eklendi
+    BUFFER_DRAIN_INTERVAL_SECONDS,
+    RESPONSE_TIMEOUT_SECONDS,
 )
 
 # ===================================================================== #
@@ -278,7 +278,7 @@ class SingleClientGUI(ttk.Frame):
     def get_input_blocking(self) -> dict:
         return self._input_queue.get()
     
-    # [YENİ] Timeout destekli kuyruk okuma
+    # Timeout destekli kuyruk okuma
     def get_input_with_timeout(self, timeout) -> dict:
         return self._input_queue.get(timeout=timeout)
 
@@ -378,10 +378,8 @@ class GameLogicGUI(GameLogic):
         else:
             self.ui.set_mode("WAITING", "Waiting for peer...")
 
-    # [YENİ] Ortak Buffer Kontrol Metodu
     def _check_and_update_buffer(self):
         now = time.time()
-        # Eğer 15 saniye geçtiyse buffer'ı boşalt (rwnd artır)
         if now - self.last_window_update >= BUFFER_DRAIN_INTERVAL_SECONDS:
             if self.recv_buffer_used > 0:
                 drain_amount = 20
@@ -395,26 +393,19 @@ class GameLogicGUI(GameLogic):
             
             self.last_window_update = now
 
-    # [YENİ] Kullanıcı Girişi Beklerken Buffer Kontrolü Yap
     def _poll_input_queue(self):
         while True:
-            # Beklerken arka planda buffer süresini kontrol et
             self._check_and_update_buffer()
             try:
-                # 0.1 saniye bekle, veri yoksa tekrar döngüye girip buffer kontrolü yap
                 return self.ui.get_input_with_timeout(timeout=0.1)
             except queue.Empty:
                 continue
     
-    # _get_user_decision_for_incoming metodunu güncelle
     def _get_user_decision_for_incoming(self) -> dict:
-        return self._poll_input_queue() # Artık direkt bloklamıyor, poll yapıyor
+        return self._poll_input_queue()
 
-    # _create_next_data_packet metodunu güncelle
     def _create_next_data_packet(self) -> Packet:
         self.ui.set_mode("SENDING")
-        # Eski: user_input = self.ui.get_input_blocking()
-        # Yeni: Polling ile bekle
         user_input = self._poll_input_queue()
         
         if user_input["action"] == "ERROR":
@@ -436,36 +427,27 @@ class GameLogicGUI(GameLogic):
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         self.ui.set_mode("WAITING")
 
-    # [YENİ] Paket Beklerken Buffer Kontrolü Yap
     def _receive_packet(self) -> Packet:
-        # Polling döngüsü ile paket bekle
         start_wait = time.time()
         raw = None
         
         while True:
-            # 1. Beklerken buffer kontrolü yap
             self._check_and_update_buffer()
             
-            # 2. Timeout kontrolü
             elapsed = time.time() - start_wait
             remaining = RESPONSE_TIMEOUT_SECONDS - elapsed
             if remaining <= 0:
                 raise TimeoutError("No response within timeout")
             
-            # 3. Kısa süreli dinleme (0.5 saniye)
             step_timeout = min(0.5, remaining)
             try:
-                # Socket'ten veriyi kısa süreli bekle
                 raw = self.conn.recv_json(timeout=step_timeout)
-                # Veri geldiyse döngüden çık
                 break 
             except TimeoutError:
-                # Timeout olduysa (henüz veri yoksa) döngü başına dön ve buffer kontrol et
                 continue
             except Exception as e:
                 raise e
         
-        # --- Buradan sonrası orijinal _receive_packet mantığı ---
         pkt = Packet.from_json(raw["packet"])
         self.logger.info(f"Received: {pkt}")
         self._record_event("Peer", self.role, pkt, pkt.type)
@@ -482,7 +464,6 @@ class GameLogicGUI(GameLogic):
             self.scoreboard.opponent_score += 1
             self.logger.info("❌ Opponent detected our error (Correct ERROR) → Opponent +1")
         
-        # GUI'ye bildir
         self.ui.append_log(f"[RECV] {pkt.type} | s={pkt.seq}, a={pkt.ack}, w={pkt.rwnd}, len={pkt.length}")
         self.ui.animate_recv(pkt)
         self.ui.show_incoming_packet(pkt)
@@ -494,6 +475,7 @@ class GameLogicGUI(GameLogic):
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         return result
     
+    # --- [ÖNEMLİ] FAST RETRANSMIT (MANUAL MODE) ---
     def _respond_to_incoming(self, pkt: Packet) -> bool:
         if pkt.type == "DATA" and self.current_rwnd == 0:
             self.logger.warning("Peer sent DATA while rwnd=0 → AUTOMATIC ERROR")
@@ -512,7 +494,7 @@ class GameLogicGUI(GameLogic):
         )
         self.logger.info(f"Validation Check: valid={is_valid}, reason={reason}")
 
-        # --- [GEÇİCİ BUFFER GÜNCELLEMESİ - ANINDA EKRANA YANSIR] ---
+        # 1. GEÇİCİ BUFFER GÜNCELLEMESİ (Tentative)
         tentative_data_len = 0
         if pkt.type == "DATA" and is_valid:
             expected_now = self.validator.peer.expected_seq
@@ -522,19 +504,43 @@ class GameLogicGUI(GameLogic):
                 if self.recv_buffer_used > MAX_RWND: self.recv_buffer_used = MAX_RWND
                 self.current_rwnd = MAX_RWND - self.recv_buffer_used
                 self.logger.info(f"Tentative Buffer Update: rwnd -> {self.current_rwnd}")
-        # -----------------------------------------------------------
 
-        # Kullanıcıdan giriş bekle (Polling ile)
+        # 2. FAST RETRANSMIT TESPİTİ (Ama oto doldurma yok!)
+        processed_ack_early = False
+        saved_gbn_base = self.gbn.state.base
+        saved_gbn_dup = self.gbn.state.duplicate_ack_count
+        saved_gbn_next = self.gbn.state.next_seq
+        
+        if is_valid and pkt.type == "ACK" and pkt.ack is not None:
+            win_adv, retx_req = self.gbn.on_ack(pkt.ack)
+            processed_ack_early = True
+            
+            if retx_req:
+                self._pending_retransmit = True
+                # UYARI: Kırmızı yazı çıkar ama kutuları ellemez.
+                self.ui.mode_label.config(text="⚠️ FAST RETRANSMIT TRIGGERED!", foreground="red")
+                self.ui.info_label.config(text=f"Packet Loss Detected! Enter Seq={self.gbn.state.base} manually to resend.")
+                # self.ui.seq_var.set(...) # <- BU SATIR SİLİNDİ (OTO DOLDURMA YOK)
+
+        # 3. KULLANICI GİRİŞİNİ BEKLE
         user_decision = self._poll_input_queue()
         outgoing_comment_flag = ""
 
         if user_decision["action"] == "ERROR":
+             # Kullanıcı ERROR dedi. Yaptığımız geçici değişiklikleri geri almalıyız.
              if tentative_data_len > 0:
                  self.recv_buffer_used -= tentative_data_len
                  if self.recv_buffer_used < 0: self.recv_buffer_used = 0
                  self.current_rwnd = MAX_RWND - self.recv_buffer_used
                  self.logger.info(f"User rejected valid packet -> Reverted rwnd to {self.current_rwnd}")
-            
+             
+             # GBN Revert
+             if processed_ack_early:
+                 self.gbn.state.base = saved_gbn_base
+                 self.gbn.state.duplicate_ack_count = saved_gbn_dup
+                 self.gbn.state.next_seq = saved_gbn_next
+                 self._pending_retransmit = False 
+
              if not is_valid:
                 self.scoreboard.detected_error()
                 outgoing_comment_flag = "CORRECT: User detected error"
@@ -551,9 +557,11 @@ class GameLogicGUI(GameLogic):
                 self.scoreboard.opponent_score += 1 
                 outgoing_comment_flag = "MISSED_ERROR"
             
-            if pkt.type == "ACK" and pkt.ack is not None:
-                win_adv, retx_req = self.gbn.on_ack(pkt.ack)
-                if retx_req: self._pending_retransmit = True
+            # Eğer yukarıda on_ack çalıştırmadıysak şimdi çalıştır
+            if not processed_ack_early:
+                 if pkt.type == "ACK" and pkt.ack is not None:
+                    win_adv, retx_req = self.gbn.on_ack(pkt.ack)
+                    if retx_req: self._pending_retransmit = True
 
             self.validator.peer.last_seq = pkt.seq
             self.validator.peer.last_len = pkt.length or 0
