@@ -2,16 +2,21 @@
 
 import threading
 import queue
+import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from core.game_logic import GameLogic
 from core.packet import Packet
+from core.connection import TimeoutError  # TimeoutError eklendi
 from utils.config import (
     MIN_SEGMENT_SIZE,
     MAX_SEGMENT_SIZE,
     ROLE_A_NAME,
     ROLE_B_NAME,
+    MAX_RWND,
+    BUFFER_DRAIN_INTERVAL_SECONDS, # Eklendi
+    RESPONSE_TIMEOUT_SECONDS,      # Eklendi
 )
 
 # ===================================================================== #
@@ -121,12 +126,12 @@ class SingleClientGUI(ttk.Frame):
 
     def _build_ui(self):
         self.root.title(f"TCP Game — {self.role} (MANUAL MODE)")
-        self.root.geometry("900x800")
+        self.root.geometry("900x850")
 
         header = ttk.Label(self, text=f"TCP Game — {self.role}", font=("Helvetica", 16, "bold"))
         header.pack(pady=(0, 4))
         
-        # SCOREBOARD
+        # --- SCOREBOARD ---
         score_frame = ttk.Frame(self, padding=5)
         score_frame.pack(fill="x", pady=(0, 8))
         
@@ -150,6 +155,19 @@ class SingleClientGUI(ttk.Frame):
         self.opponent_score_label = ttk.Label(right_score, text="0", font=("Helvetica", 28, "bold"), foreground="#E74C3C")
         self.opponent_score_label.pack()
         ttk.Label(right_score, text="points", font=("Helvetica", 9), foreground="gray").pack()
+        
+        # --- RWND DURUM PANELİ ---
+        status_frame = ttk.Frame(self, relief="groove", borderwidth=2, padding=5)
+        status_frame.pack(fill="x", pady=(0, 8))
+        
+        self.rwnd_label = ttk.Label(
+            status_frame, 
+            text="My Receiver Window (rwnd): 50", 
+            font=("Courier", 12, "bold"), 
+            foreground="#8E44AD"
+        )
+        self.rwnd_label.pack()
+        # -------------------------
         
         self.traffic = TrafficCanvas(self, local_name=self.role, peer_name=self.peer_name)
         self.traffic.pack(fill="x", pady=(0, 8))
@@ -259,29 +277,29 @@ class SingleClientGUI(ttk.Frame):
 
     def get_input_blocking(self) -> dict:
         return self._input_queue.get()
+    
+    # [YENİ] Timeout destekli kuyruk okuma
+    def get_input_with_timeout(self, timeout) -> dict:
+        return self._input_queue.get(timeout=timeout)
 
     def set_mode(self, mode: str, message: str = ""):
         self.current_mode = mode
         
         if mode == "SENDING":
-            # Sıra bizde: Yeni paket yollama
-            self.mode_label.config(text="🚀 YOUR TURN: Send a packet", foreground="#27AE60") # Yeşil
+            self.mode_label.config(text="🚀 YOUR TURN: Send a packet", foreground="#27AE60") 
             self.info_label.config(text="Fill all 4 fields and click SEND")
             self.error_btn.config(state="disabled")
             self.send_btn.config(state="normal")
             
         elif mode == "RESPONDING":
-            # Sıra bizde: Gelen pakete yanıt verme
             msg = message if message else "Packet received!"
-            # İSTEK: Sıra bizdeyse her zaman YEŞİL ve YOUR TURN yazsın
-            self.mode_label.config(text=f"🚀 YOUR TURN: {msg}", foreground="#27AE60") # Yeşil
+            self.mode_label.config(text=f"🚀 YOUR TURN: {msg}", foreground="#27AE60") 
             self.info_label.config(text="Click SEND to respond or ERROR to reject")
             self.error_btn.config(state="normal")
             self.send_btn.config(state="normal")
 
         elif mode == "WAITING":
-            # Sıra rakipte: Bekleme modu
-            self.mode_label.config(text="⏳ WAITING for peer...", foreground="#E67E22") # Turuncu
+            self.mode_label.config(text="⏳ WAITING for peer...", foreground="#E67E22")
             self.info_label.config(text="Please wait for the opponent's move")
             self.error_btn.config(state="disabled")
             self.send_btn.config(state="disabled")
@@ -300,7 +318,6 @@ class SingleClientGUI(ttk.Frame):
             self.append_log(f"\n{'='*60}\n{text}\n{'='*60}")
             self.set_mode("RESPONDING", "Packet received!")
         
-        # UI güncellemesini main thread'in event queue'suna ekle
         self.root.after(0, _update_ui)
 
     def append_log(self, text: str):
@@ -310,24 +327,20 @@ class SingleClientGUI(ttk.Frame):
         self.log.configure(state="disabled")
     
     def update_scores(self, my_score: int, opponent_score: int):
-        """Skorları güncelle - thread-safe"""
         def _update():
             self.my_score_label.config(text=str(my_score))
             self.opponent_score_label.config(text=str(opponent_score))
             
-            # Renk güncellemesi - kazanan yeşil
             if my_score > opponent_score:
-                self.my_score_label.config(foreground="#27AE60")  # Yeşil
-                self.opponent_score_label.config(foreground="#E74C3C")  # Kırmızı
+                self.my_score_label.config(foreground="#27AE60")
+                self.opponent_score_label.config(foreground="#E74C3C")
             elif opponent_score > my_score:
-                self.my_score_label.config(foreground="#E74C3C")  # Kırmızı
-                self.opponent_score_label.config(foreground="#27AE60")  # Yeşil
+                self.my_score_label.config(foreground="#E74C3C")
+                self.opponent_score_label.config(foreground="#27AE60")
             else:
-                # Berabere - her ikisi de mavi
-                self.my_score_label.config(foreground="#3498DB")  # Mavi
-                self.opponent_score_label.config(foreground="#3498DB")  # Mavi
+                self.my_score_label.config(foreground="#3498DB")
+                self.opponent_score_label.config(foreground="#3498DB")
         
-        # GUI update'ini main thread'de schedule et
         self.root.after(0, _update)
     
     def animate_send(self, pkt): 
@@ -335,6 +348,19 @@ class SingleClientGUI(ttk.Frame):
     
     def animate_recv(self, pkt): 
         self.traffic.enqueue_packet("incoming", pkt.type, pkt.seq, pkt.ack, pkt.length)
+    
+    # --- RWND CANLI TAKİP METODU ---
+    def start_rwnd_monitor(self, game_logic):
+        current_val = game_logic.current_rwnd
+        
+        self.rwnd_label.config(text=f"My Receiver Window (rwnd): {current_val}")
+        
+        if current_val <= 0:
+            self.rwnd_label.config(foreground="red", text=f"⚠️ RWND CLOSED ({current_val})")
+        else:
+            self.rwnd_label.config(foreground="#8E44AD")
+
+        self.root.after(100, self.start_rwnd_monitor, game_logic)
 
 
 # ===================================================================== #
@@ -345,22 +371,51 @@ class GameLogicGUI(GameLogic):
     def __init__(self, role_name, conn, starts_first, ui: SingleClientGUI):
         super().__init__(role_name, conn, starts_first)
         self.ui = ui
-        
-        # Başlangıç skorlarını göster
         self.ui.update_scores(0, 0)
         
         if starts_first:
             self.ui.set_mode("SENDING")
         else:
-            # ClientB başlangıçta beklemede (WAITING modu)
             self.ui.set_mode("WAITING", "Waiting for peer...")
-    
-    def _get_user_decision_for_incoming(self) -> dict:
-        return self.ui.get_input_blocking()
 
+    # [YENİ] Ortak Buffer Kontrol Metodu
+    def _check_and_update_buffer(self):
+        now = time.time()
+        # Eğer 15 saniye geçtiyse buffer'ı boşalt (rwnd artır)
+        if now - self.last_window_update >= BUFFER_DRAIN_INTERVAL_SECONDS:
+            if self.recv_buffer_used > 0:
+                drain_amount = 20
+                if self.recv_buffer_used <= drain_amount: 
+                    self.recv_buffer_used = 0
+                else: 
+                    self.recv_buffer_used -= drain_amount
+                
+                self.current_rwnd = MAX_RWND - self.recv_buffer_used
+                self.logger.info(f"Buffer Drain Executed: used={self.recv_buffer_used}, rwnd={self.current_rwnd}")
+            
+            self.last_window_update = now
+
+    # [YENİ] Kullanıcı Girişi Beklerken Buffer Kontrolü Yap
+    def _poll_input_queue(self):
+        while True:
+            # Beklerken arka planda buffer süresini kontrol et
+            self._check_and_update_buffer()
+            try:
+                # 0.1 saniye bekle, veri yoksa tekrar döngüye girip buffer kontrolü yap
+                return self.ui.get_input_with_timeout(timeout=0.1)
+            except queue.Empty:
+                continue
+    
+    # _get_user_decision_for_incoming metodunu güncelle
+    def _get_user_decision_for_incoming(self) -> dict:
+        return self._poll_input_queue() # Artık direkt bloklamıyor, poll yapıyor
+
+    # _create_next_data_packet metodunu güncelle
     def _create_next_data_packet(self) -> Packet:
         self.ui.set_mode("SENDING")
-        user_input = self.ui.get_input_blocking()
+        # Eski: user_input = self.ui.get_input_blocking()
+        # Yeni: Polling ile bekle
+        user_input = self._poll_input_queue()
         
         if user_input["action"] == "ERROR":
             self.logger.warning("User pressed ERROR during send phase")
@@ -378,21 +433,59 @@ class GameLogicGUI(GameLogic):
         self.ui.append_log(f"[SEND] {pkt.type} | s={pkt.seq}, a={pkt.ack}, w={pkt.rwnd}, len={pkt.length}")
         self.ui.animate_send(pkt)
         super()._send_packet(pkt)
-        # Skorları güncelle
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
-        
-        # EKLENEN KISIM: Paket yolladık, artık sıra rakipte -> WAITING
         self.ui.set_mode("WAITING")
 
+    # [YENİ] Paket Beklerken Buffer Kontrolü Yap
     def _receive_packet(self) -> Packet:
-        pkt = super()._receive_packet()
+        # Polling döngüsü ile paket bekle
+        start_wait = time.time()
+        raw = None
+        
+        while True:
+            # 1. Beklerken buffer kontrolü yap
+            self._check_and_update_buffer()
+            
+            # 2. Timeout kontrolü
+            elapsed = time.time() - start_wait
+            remaining = RESPONSE_TIMEOUT_SECONDS - elapsed
+            if remaining <= 0:
+                raise TimeoutError("No response within timeout")
+            
+            # 3. Kısa süreli dinleme (0.5 saniye)
+            step_timeout = min(0.5, remaining)
+            try:
+                # Socket'ten veriyi kısa süreli bekle
+                raw = self.conn.recv_json(timeout=step_timeout)
+                # Veri geldiyse döngüden çık
+                break 
+            except TimeoutError:
+                # Timeout olduysa (henüz veri yoksa) döngü başına dön ve buffer kontrol et
+                continue
+            except Exception as e:
+                raise e
+        
+        # --- Buradan sonrası orijinal _receive_packet mantığı ---
+        pkt = Packet.from_json(raw["packet"])
+        self.logger.info(f"Received: {pkt}")
+        self._record_event("Peer", self.role, pkt, pkt.type)
+        self.last_activity_time = time.time()
+
+        incoming_comment = (pkt.comment or "").upper()
+        if "MISSED_ERROR" in incoming_comment:
+            self.scoreboard.my_score += 1
+            self.logger.info("🏆 Peer accepted our INVALID packet (Missed Error) → My Score +1")
+        elif "FALSE" in incoming_comment and pkt.type == "ERROR":
+            self.scoreboard.opponent_score -= 1
+            self.logger.info("⬇️ Opponent sent False Alarm (Invalid ERROR) → Opponent -1")
+        elif "CORRECT" in incoming_comment and pkt.type == "ERROR":
+            self.scoreboard.opponent_score += 1
+            self.logger.info("❌ Opponent detected our error (Correct ERROR) → Opponent +1")
+        
+        # GUI'ye bildir
         self.ui.append_log(f"[RECV] {pkt.type} | s={pkt.seq}, a={pkt.ack}, w={pkt.rwnd}, len={pkt.length}")
         self.ui.animate_recv(pkt)
-        
-        # show_incoming_packet içinde zaten "RESPONDING" (Yeşil) moda geçiliyor
         self.ui.show_incoming_packet(pkt)
-        
-        # Skorları güncelle
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         return pkt
     
@@ -401,15 +494,87 @@ class GameLogicGUI(GameLogic):
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         return result
     
-    def _respond_to_incoming(self, pkt):
-        result = super()._respond_to_incoming(pkt)
-        self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
-        return result
+    def _respond_to_incoming(self, pkt: Packet) -> bool:
+        if pkt.type == "DATA" and self.current_rwnd == 0:
+            self.logger.warning("Peer sent DATA while rwnd=0 → AUTOMATIC ERROR")
+            self.scoreboard.detected_error()
+            err = Packet.error(comment="CORRECT: DATA sent while advertised rwnd=0")
+            self._send_packet(err)
+            return False
+
+        if self.start_time is None: elapsed = 0.0
+        else: elapsed = time.time() - self.start_time
+
+        is_valid, reason = self.validator.validate(
+            pkt, 
+            last_sent_seq=self.last_sent_seq,
+            elapsed_time=elapsed
+        )
+        self.logger.info(f"Validation Check: valid={is_valid}, reason={reason}")
+
+        # --- [GEÇİCİ BUFFER GÜNCELLEMESİ - ANINDA EKRANA YANSIR] ---
+        tentative_data_len = 0
+        if pkt.type == "DATA" and is_valid:
+            expected_now = self.validator.peer.expected_seq
+            if (pkt.seq or 0) + (pkt.length or 0) == expected_now:
+                tentative_data_len = (pkt.length or 0)
+                self.recv_buffer_used += tentative_data_len
+                if self.recv_buffer_used > MAX_RWND: self.recv_buffer_used = MAX_RWND
+                self.current_rwnd = MAX_RWND - self.recv_buffer_used
+                self.logger.info(f"Tentative Buffer Update: rwnd -> {self.current_rwnd}")
+        # -----------------------------------------------------------
+
+        # Kullanıcıdan giriş bekle (Polling ile)
+        user_decision = self._poll_input_queue()
+        outgoing_comment_flag = ""
+
+        if user_decision["action"] == "ERROR":
+             if tentative_data_len > 0:
+                 self.recv_buffer_used -= tentative_data_len
+                 if self.recv_buffer_used < 0: self.recv_buffer_used = 0
+                 self.current_rwnd = MAX_RWND - self.recv_buffer_used
+                 self.logger.info(f"User rejected valid packet -> Reverted rwnd to {self.current_rwnd}")
+            
+             if not is_valid:
+                self.scoreboard.detected_error()
+                outgoing_comment_flag = "CORRECT: User detected error"
+             else:
+                self.scoreboard.my_score -= 1
+                outgoing_comment_flag = "FALSE: User pressed ERROR but packet was valid"
+             
+             err = Packet.error(comment=outgoing_comment_flag)
+             self._send_packet(err)
+             return False
+
+        else:
+            if not is_valid:
+                self.scoreboard.opponent_score += 1 
+                outgoing_comment_flag = "MISSED_ERROR"
+            
+            if pkt.type == "ACK" and pkt.ack is not None:
+                win_adv, retx_req = self.gbn.on_ack(pkt.ack)
+                if retx_req: self._pending_retransmit = True
+
+            self.validator.peer.last_seq = pkt.seq
+            self.validator.peer.last_len = pkt.length or 0
+            self.validator.peer.last_ack = pkt.ack
+            self.validator.peer.last_rwnd = pkt.rwnd
+
+            response_pkt = self._create_response_packet_from_input(user_decision)
+            if outgoing_comment_flag:
+                response_pkt.comment = f"{response_pkt.comment or ''} [{outgoing_comment_flag}]".strip()
+            
+            self._send_packet(response_pkt)
+            self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
+            return False
 
 def run_gui_client(role: str, conn, starts_first: bool):
     root = tk.Tk()
     ui = SingleClientGUI(root, role=role)
     game = GameLogicGUI(role, conn, starts_first, ui)
+    
+    ui.start_rwnd_monitor(game)
+    
     t = threading.Thread(target=game.run, daemon=True)
     t.start()
     try:
