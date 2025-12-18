@@ -2,62 +2,67 @@
 
 from dataclasses import dataclass
 from .packet import Packet
-from utils.config import MAX_RWND
+from utils.config import MAX_RWND, BUFFER_DRAIN_INTERVAL_SECONDS
 
 
 @dataclass
 class PeerState:
-    # En son gördüğümüz paket bilgileri
     last_seq: int = 0
     last_len: int = 0
     last_ack: int = 0
     last_rwnd: int = MAX_RWND
-    # Bir sonrakinde beklediğimiz seq (last_seq + last_len)
     expected_seq: int = 0
 
 
 class PacketValidator:
     """
-    Basit mantıksal tutarlılık kontrolleri.
+    Mantıksal tutarlılık kontrolleri.
+    Artık 'rwnd' için TAM EŞİTLİK (Strict Equality) kontrolü yapıyor.
     """
 
     def __init__(self) -> None:
         self.peer = PeerState()
 
     def reset(self) -> None:
-        """İstendiğinde karşı tarafın state'ini sıfırlamak için yardımcı metod."""
         self.peer = PeerState()
 
-    def validate(self, pkt: Packet, last_sent_seq: int) -> tuple[bool, str]:
+    def validate(self, pkt: Packet, last_sent_seq: int, elapsed_time: float = 0.0) -> tuple[bool, str]:
         """
         Gelen paketi doğrula.
-
-        last_sent_seq: bizim şu ana kadar kullandığımız en yüksek sequence number.
-        Dönüş: (is_valid, reason)
         """
 
-        # ---------------------- Temel yapısal kontroller ---------------------- #
+        # --- Temel yapısal kontroller ---
         if pkt.type not in {"DATA", "ACK", "ERROR"}:
             return False, "Unknown packet type"
 
         if pkt.type == "ERROR":
             return True, "Peer reports ERROR"
 
-        # rwnd range
-        if pkt.rwnd is None or pkt.rwnd < 0 or pkt.rwnd > MAX_RWND:
-            return False, "Invalid rwnd (out of 0-50 range)"
+        # 1. KURAL: RWND 50'DEN BÜYÜK OLAMAZ
+        # Eğer girilen window size maksimumdan (50) büyükse -> INVALID
+        if pkt.rwnd is None or pkt.rwnd > MAX_RWND:
+            return False, f"Invalid rwnd: {pkt.rwnd} > {MAX_RWND}"
+            
+        if pkt.rwnd < 0:
+            return False, "Invalid rwnd: negative value"
 
-        # ---------------------- İMKANSIZ RWND KONTROLÜ ---------------------- #
-        # Mantık: Karşı tarafın buffer'ı, bizim gönderdiğimiz veriden daha fazla dolamaz.
-        # Örneğin biz toplam 10 byte yolladıysak (last_sent_seq=10), 
-        # karşı tarafın rwnd değeri en az 40 olabilir (50 - 10). 
-        # Eğer karşı taraf rwnd=30 derse (20 byte dolu), bu imkansızdır.
-        # (Bu kontrol özellikle oyunun başlarında kritiktir)
-        
-        min_possible_rwnd = max(0, MAX_RWND - last_sent_seq)
-        
-        if pkt.rwnd < min_possible_rwnd:
-            return False, f"Impossible rwnd: {pkt.rwnd} (sent {last_sent_seq} bytes, min expected {min_possible_rwnd})"
+        # 2. KURAL: DOĞRU DEĞER İLE KARŞILAŞTIRMA (Strict Check)
+        # Eğer rwnd <= 50 ise, olması gereken değerle birebir uyuşmalı.
+        if pkt.ack is not None:
+            # Geçen süreye göre ne kadar veri silinmiş (drain) olmalı?
+            # Config'de 20000 olduğu için testte burası 0 gelir.
+            max_drained = int(elapsed_time / BUFFER_DRAIN_INTERVAL_SECONDS) * 20
+            
+            # Tamponda (Buffer) şu an ne kadar veri var?
+            # Buffer = Toplam Alınan (ack) - Toplam Silinen (drained)
+            bytes_in_buffer = max(0, pkt.ack - max_drained)
+            
+            # Olması gereken TEK doğru rwnd değeri
+            expected_rwnd = max(0, MAX_RWND - bytes_in_buffer)
+            
+            # Gelen değer, hesaplanan değerle AYNI DEĞİLSE -> INVALID
+            if pkt.rwnd != expected_rwnd:
+                return False, f"Rwnd mismatch: got {pkt.rwnd}, expected {expected_rwnd} (ack={pkt.ack})"
 
         # -------------------------------------------------------------------- #
 
@@ -82,17 +87,16 @@ class PacketValidator:
         if last_sent_seq > 0 and pkt.ack != last_sent_seq:
              return False, f"Incorrect ACK value: got {pkt.ack}, expected {last_sent_seq}"
 
-        # Go-Back-N kontrolleri (Eski paketler)
+        # GBN Check
         if pkt.seq < self.peer.expected_seq:
             self.peer.last_ack = pkt.ack
             self.peer.last_rwnd = pkt.rwnd
             return True, "Old or retransmitted segment"
         
-        # Seq Gap kontrolü
         if pkt.seq > self.peer.expected_seq:
             return False, f"Sequence number gap: got {pkt.seq}, expected {self.peer.expected_seq}"
 
-        # State güncelleme
+        # State Update
         self.peer.last_seq = pkt.seq
         self.peer.last_len = pkt.length
         self.peer.last_ack = pkt.ack
