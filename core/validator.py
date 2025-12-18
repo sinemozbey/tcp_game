@@ -45,7 +45,7 @@ class PacketValidator:
             
         if pkt.rwnd < 0:
             return False, "Invalid rwnd: negative value"
-
+        
         # 2. KURAL: DOĞRU DEĞER İLE KARŞILAŞTIRMA (Strict Check)
         # Eğer rwnd <= 50 ise, olması gereken değerle birebir uyuşmalı.
         if pkt.ack is not None:

@@ -202,7 +202,7 @@ class GameLogic:
         try:
             while True:
                 now = time.time()
-
+                
                 if now - self.last_window_update >= BUFFER_DRAIN_INTERVAL_SECONDS:
                     if self.recv_buffer_used > 0:
                         drain_amount = 20
@@ -210,7 +210,7 @@ class GameLogic:
                         else: self.recv_buffer_used -= drain_amount
                         self.current_rwnd = MAX_RWND - self.recv_buffer_used
                         self.last_window_update = now
-
+                
                 elapsed = now - start_time
                 remaining = GAME_DURATION_SECONDS - elapsed
                 if remaining <= 0: break

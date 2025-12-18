@@ -4,7 +4,7 @@ import threading
 import queue
 import time
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, scrolledtext
 
 from core.game_logic import GameLogic
 from core.packet import Packet
@@ -20,91 +20,134 @@ from utils.config import (
 )
 
 # ===================================================================== #
-#  TOP SECTION: ANIMATION PANEL (LOCAL <-> PEER PACKET FLOW)
+#  TOP SECTION: TIMELINE PANEL (VERTICAL PACKET FLOW)
 # ===================================================================== #
 
-class TrafficCanvas(ttk.Frame):
+class TimelineCanvas(ttk.Frame):
     def __init__(self, master: tk.Misc, local_name: str, peer_name: str, **kwargs):
         super().__init__(master, **kwargs)
 
         self.local_name = local_name
         self.peer_name = peer_name
 
-        self.canvas = tk.Canvas(self, height=140, bg="#f7f7f7", highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True, padx=10, pady=8)
+        # --- Scrollbar ve Canvas Kurulumu ---
+        self.scrollbar = tk.Scrollbar(self, orient="vertical")
+        self.scrollbar.pack(side="right", fill="y")
 
-        self.local_box = None
-        self.peer_box = None
-        self.local_label = None
-        self.peer_label = None
-        self.line_id = None
-
-        self.current_ball = None
-        self.current_ball_text = None
-        self.anim_queue: "queue.Queue[dict]" = queue.Queue()
-        self.anim_running = False
-
-        self._build_static()
-        self.after(40, self._animation_step)
-
-    def _build_static(self):
-        x_local = 80
-        x_peer = 420
-        y_center = 80
-        self.local_box = self.canvas.create_rectangle(
-            x_local - 40, y_center - 25, x_local + 40, y_center + 25,
-            outline="#4a90e2", width=2, fill="#ffffff"
+        self.canvas = tk.Canvas(
+            self, 
+            height=250, 
+            bg="white", 
+            bd=2, 
+            relief="ridge",
+            yscrollcommand=self.scrollbar.set
         )
-        self.peer_box = self.canvas.create_rectangle(
-            x_peer - 40, y_center - 25, x_peer + 40, y_center + 25,
-            outline="#e67e22", width=2, fill="#ffffff"
-        )
-        self.local_label = self.canvas.create_text(
-            x_local, y_center + 38, text=self.local_name, font=("Helvetica", 9, "bold")
-        )
-        self.peer_label = self.canvas.create_text(
-            x_peer, y_center + 38, text=self.peer_name, font=("Helvetica", 9, "bold")
-        )
-        self.line_id = self.canvas.create_line(
-            x_local + 40, y_center, x_peer - 40, y_center,
-            dash=(4, 2), fill="#999999"
-        )
+        self.canvas.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        self.scrollbar.config(command=self.canvas.yview)
 
-    def enqueue_packet(self, direction, kind, seq, ack, length):
-        self.anim_queue.put({"direction": direction, "kind": kind, "seq": seq, "ack": ack, "length": length})
+        # Çizim Parametreleri
+        self.current_y = 40      # İlk okun başlayacağı Y koordinatı
+        self.y_step = 40         # Her paket arasındaki dikey boşluk
+        self.margin_x = 60       # Kenar boşlukları
+        self.arrow_slant = 15    # Okun aşağı doğru eğimi
 
-    def _start_next_ball(self, item):
-        if self.current_ball: self.canvas.delete(self.current_ball)
-        if self.current_ball_text: self.canvas.delete(self.current_ball_text)
-        x1, y1, x2, y2 = self.canvas.coords(self.line_id)
-        direction = item["direction"]
-        x = x1 if direction == "outgoing" else x2
-        dx = +6 if direction == "outgoing" else -6
-        y = y1
-        r = 7
-        color = {"DATA": "#3498db", "ACK": "#2ecc71", "ERROR": "#e74c3c", "RETX": "#f39c12"}.get(item["kind"], "#34495e")
-        self.current_ball = self.canvas.create_oval(x-r, y-r, x+r, y+r, fill=color, outline="")
-        label = item["kind"]
-        if item["seq"] is not None: label += f" s={item['seq']}"
-        self.current_ball_text = self.canvas.create_text(x, y-15, text=label, font=("Helvetica", 8))
-        self.anim_running = True
-        self.canvas.itemconfig(self.current_ball, tags=("ball", str(dx)))
-        self.canvas.itemconfig(self.current_ball_text, tags=("ball_text", str(dx)))
+        self.canvas.bind("<Configure>", self._on_resize)
+        self.width = 1
 
-    def _animation_step(self):
-        if self.anim_running and self.current_ball:
-            x1, _, x2, _ = self.canvas.coords(self.current_ball)
-            lx1, _, lx2, _ = self.canvas.coords(self.line_id)
-            dx = int(self.canvas.gettags(self.current_ball)[1])
-            if (dx > 0 and x2 < lx2) or (dx < 0 and x1 > lx1):
-                self.canvas.move(self.current_ball, dx, 0)
-                self.canvas.move(self.current_ball_text, dx, 0)
-            else:
-                self.canvas.delete(self.current_ball); self.canvas.delete(self.current_ball_text)
-                self.current_ball = None; self.current_ball_text = None; self.anim_running = False
-        if not self.anim_running and not self.anim_queue.empty():
-            self._start_next_ball(self.anim_queue.get_nowait())
-        self.after(40, self._animation_step)
+        self._draw_headers()
+
+    def _on_resize(self, event):
+        self.width = event.width
+        self._draw_headers()
+
+    def _draw_headers(self):
+        """Başlıkları ve dikey çizgileri çizer."""
+        self.canvas.delete("header")
+        
+        x_left = self.margin_x
+        # Eğer width henüz hesaplanmadıysa varsayılan bir değer kullan
+        w = self.width if self.width > 100 else 400
+        x_right = w - self.margin_x
+
+        # İsimler
+        self.canvas.create_text(x_left, 15, text=f"{self.local_name} (Me)", font=("Helvetica", 9, "bold"), tags="header", anchor="center")
+        self.canvas.create_text(x_right, 15, text=self.peer_name, font=("Helvetica", 9, "bold"), tags="header", anchor="center")
+        
+        # Dikey referans çizgileri
+        # ÖNEMLİ DÜZELTME: Çizgiler artık sonsuza (50000) değil, mevcut içeriğin bittiği yere kadar gidiyor.
+        # En az canvas boyu kadar olsun ki boşken çirkin durmasın.
+        line_height = max(self.current_y + 50, self.canvas.winfo_height())
+        
+        self.canvas.create_line(x_left, 25, x_left, line_height, fill="#dddddd", dash=(4, 4), tags="header")
+        self.canvas.create_line(x_right, 25, x_right, line_height, fill="#dddddd", dash=(4, 4), tags="header")
+
+    def add_packet_arrow(self, direction, kind, seq, ack, rwnd, length):
+        """
+        Timeline'a yeni bir paket oku ekler.
+        direction: 'outgoing' veya 'incoming'
+        """
+        x_left = self.margin_x
+        w = self.canvas.winfo_width()
+        x_right = (w if w > 100 else 400) - self.margin_x
+        
+        y_start = self.current_y
+        y_end = self.current_y + self.arrow_slant
+
+        # --- RENK MANTIĞI ---
+        # 1. Ok Rengi (GÖNDEREN KİM? A mı B mi?)
+        # Önce gönderenin kim olduğunu bulalım
+        if direction == "outgoing":
+            sender_name = self.local_name
+        else:
+            sender_name = self.peer_name
+            
+        if sender_name == ROLE_A_NAME:
+            arrow_color = "#3498db" # Client A = Mavi
+        else:
+            arrow_color = "#e67e22" # Client B = Turuncu
+        
+        # 2. Metin Rengi (Paket Tipi Nedir?)
+        text_color = "black"
+        line_width = 2
+        
+        if kind == "ACK": 
+            text_color = "#27ae60"   # Yeşil yazı
+        elif kind == "ERROR": 
+            text_color = "#c0392b"   # Kırmızı yazı
+            line_width = 3           # Hata okları daha kalın
+            arrow_color = "#c0392b"  # Hata okları komple kırmızı olsun
+        elif kind == "RETX":
+            text_color = "#d35400"   # Koyu Turuncu
+
+        # Etiket Metni
+        label = f"{kind}"
+        if seq is not None: label += f" s={seq}"
+        if ack is not None: label += f" a={ack}"
+        if rwnd is not None: label += f" w={rwnd}"
+        if length is not None: label += f" len={length}"
+
+        if direction == "outgoing":
+            # Bizden -> Karşıya (Soldan Sağa)
+            self.canvas.create_line(x_left, y_start, x_right, y_end, arrow=tk.LAST, fill=arrow_color, width=line_width, tags="arrow")
+            self.canvas.create_text((x_left + x_right) / 2, y_start - 8, text=label, fill=text_color, font=("Helvetica", 8, "bold"), tags="arrow")
+        else:
+            # Karşıdan -> Bize (Sağdan Sola)
+            self.canvas.create_line(x_right, y_start, x_left, y_end, arrow=tk.LAST, fill=arrow_color, width=line_width, tags="arrow")
+            self.canvas.create_text((x_left + x_right) / 2, y_start - 8, text=label, fill=text_color, font=("Helvetica", 8, "bold"), tags="arrow")
+
+        # Sonraki pozisyonu güncelle
+        self.current_y += self.y_step
+        
+        # Dikey çizgileri uzatmak için header'ı güncelle (ama her seferinde hepsini silip çizmek yerine sadece update edebiliriz,
+        # fakat basitlik için _draw_headers çağırabiliriz veya sadece arka plan çizgilerini uzatabiliriz.)
+        # Performans için sadece çizgileri güncelleyelim:
+        self._draw_headers()
+
+        # Scroll alanını güncelle ve EN ALTA kaydır
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        
+        # Bazen bbox hemen güncellenmez, update_idletasks gerekebilir ama genellikle after döngüsünde olduğumuz için çalışır.
+        self.canvas.yview_moveto(1.0)
 
 
 # ===================================================================== #
@@ -126,7 +169,7 @@ class SingleClientGUI(ttk.Frame):
 
     def _build_ui(self):
         self.root.title(f"TCP Game — {self.role} (MANUAL MODE)")
-        self.root.geometry("900x850")
+        self.root.geometry("950x900") 
 
         header = ttk.Label(self, text=f"TCP Game — {self.role}", font=("Helvetica", 16, "bold"))
         header.pack(pady=(0, 4))
@@ -169,8 +212,12 @@ class SingleClientGUI(ttk.Frame):
         self.rwnd_label.pack()
         # -------------------------
         
-        self.traffic = TrafficCanvas(self, local_name=self.role, peer_name=self.peer_name)
-        self.traffic.pack(fill="x", pady=(0, 8))
+        # --- TIMELINE (YENİ) ---
+        timeline_frame = ttk.LabelFrame(self, text="📊 Packet Timeline (A=Blue, B=Orange)", padding=5)
+        timeline_frame.pack(fill="x", pady=(0, 8), expand=False)
+        
+        self.timeline = TimelineCanvas(timeline_frame, local_name=self.role, peer_name=self.peer_name, height=250)
+        self.timeline.pack(fill="both", expand=True)
 
         # GELEN PAKET
         incoming_frame = ttk.LabelFrame(self, text="📥 Incoming Packet", padding=10)
@@ -233,7 +280,7 @@ class SingleClientGUI(ttk.Frame):
         bottom = ttk.LabelFrame(self, text="📋 Event Logs", padding=8)
         bottom.pack(fill="both", expand=True)
         
-        self.log = tk.Text(bottom, height=12, font=("Courier", 9))
+        self.log = tk.Text(bottom, height=8, font=("Courier", 9))
         self.log.pack(fill="both", expand=True)
         self.log.configure(state="disabled")
         
@@ -278,7 +325,6 @@ class SingleClientGUI(ttk.Frame):
     def get_input_blocking(self) -> dict:
         return self._input_queue.get()
     
-    # Timeout destekli kuyruk okuma
     def get_input_with_timeout(self, timeout) -> dict:
         return self._input_queue.get(timeout=timeout)
 
@@ -344,12 +390,15 @@ class SingleClientGUI(ttk.Frame):
         self.root.after(0, _update)
     
     def animate_send(self, pkt): 
-        self.traffic.enqueue_packet("outgoing", pkt.type, pkt.seq, pkt.ack, pkt.length)
+        self.root.after(0, lambda: self.timeline.add_packet_arrow(
+            "outgoing", pkt.type, pkt.seq, pkt.ack, pkt.rwnd, pkt.length
+        ))
     
     def animate_recv(self, pkt): 
-        self.traffic.enqueue_packet("incoming", pkt.type, pkt.seq, pkt.ack, pkt.length)
+        self.root.after(0, lambda: self.timeline.add_packet_arrow(
+            "incoming", pkt.type, pkt.seq, pkt.ack, pkt.rwnd, pkt.length
+        ))
     
-    # --- RWND CANLI TAKİP METODU ---
     def start_rwnd_monitor(self, game_logic):
         current_val = game_logic.current_rwnd
         
@@ -475,7 +524,6 @@ class GameLogicGUI(GameLogic):
         self.ui.update_scores(self.scoreboard.my_score, self.scoreboard.opponent_score)
         return result
     
-    # --- [ÖNEMLİ] FAST RETRANSMIT (MANUAL MODE) ---
     def _respond_to_incoming(self, pkt: Packet) -> bool:
         if pkt.type == "DATA" and self.current_rwnd == 0:
             self.logger.warning("Peer sent DATA while rwnd=0 → AUTOMATIC ERROR")
@@ -505,7 +553,7 @@ class GameLogicGUI(GameLogic):
                 self.current_rwnd = MAX_RWND - self.recv_buffer_used
                 self.logger.info(f"Tentative Buffer Update: rwnd -> {self.current_rwnd}")
 
-        # 2. FAST RETRANSMIT TESPİTİ (Ama oto doldurma yok!)
+        # 2. FAST RETRANSMIT TESPİTİ
         processed_ack_early = False
         saved_gbn_base = self.gbn.state.base
         saved_gbn_dup = self.gbn.state.duplicate_ack_count
@@ -517,24 +565,20 @@ class GameLogicGUI(GameLogic):
             
             if retx_req:
                 self._pending_retransmit = True
-                # UYARI: Kırmızı yazı çıkar ama kutuları ellemez.
                 self.ui.mode_label.config(text="⚠️ FAST RETRANSMIT TRIGGERED!", foreground="red")
                 self.ui.info_label.config(text=f"Packet Loss Detected! Enter Seq={self.gbn.state.base} manually to resend.")
-                # self.ui.seq_var.set(...) # <- BU SATIR SİLİNDİ (OTO DOLDURMA YOK)
 
         # 3. KULLANICI GİRİŞİNİ BEKLE
         user_decision = self._poll_input_queue()
         outgoing_comment_flag = ""
 
         if user_decision["action"] == "ERROR":
-             # Kullanıcı ERROR dedi. Yaptığımız geçici değişiklikleri geri almalıyız.
              if tentative_data_len > 0:
                  self.recv_buffer_used -= tentative_data_len
                  if self.recv_buffer_used < 0: self.recv_buffer_used = 0
                  self.current_rwnd = MAX_RWND - self.recv_buffer_used
                  self.logger.info(f"User rejected valid packet -> Reverted rwnd to {self.current_rwnd}")
              
-             # GBN Revert
              if processed_ack_early:
                  self.gbn.state.base = saved_gbn_base
                  self.gbn.state.duplicate_ack_count = saved_gbn_dup
@@ -557,7 +601,6 @@ class GameLogicGUI(GameLogic):
                 self.scoreboard.opponent_score += 1 
                 outgoing_comment_flag = "MISSED_ERROR"
             
-            # Eğer yukarıda on_ack çalıştırmadıysak şimdi çalıştır
             if not processed_ack_early:
                  if pkt.type == "ACK" and pkt.ack is not None:
                     win_adv, retx_req = self.gbn.on_ack(pkt.ack)
