@@ -88,8 +88,8 @@ class GameLogic:
 
         incoming_comment = (pkt.comment or "").upper()
         if "MISSED_ERROR" in incoming_comment:
-            self.scoreboard.my_score += 1
-            self.logger.info("🏆 Peer accepted our INVALID packet (Missed Error) → My Score +1")
+            self.scoreboard.my_score -= 1
+            self.logger.info("🏆 Peer accepted our INVALID packet (Missed Error) → My Score -1")
         elif "FALSE" in incoming_comment and pkt.type == "ERROR":
             self.scoreboard.opponent_score -= 1
             self.logger.info("⬇️ Opponent sent False Alarm (Invalid ERROR) → Opponent -1")
@@ -148,7 +148,7 @@ class GameLogic:
 
         else:
             if not is_valid:
-                self.scoreboard.opponent_score += 1 
+                self.scoreboard.my_score -= 1
                 outgoing_comment_flag = "MISSED_ERROR"
             
             if pkt.type == "DATA":
